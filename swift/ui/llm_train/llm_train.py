@@ -11,6 +11,8 @@ from functools import partial
 from json import JSONDecodeError
 from subprocess import PIPE, STDOUT, Popen
 from transformers.utils import is_torch_cuda_available, is_torch_npu_available
+
+from swift.utils import is_torch_supa_available
 from typing import Dict, Type
 
 from swift.arguments import ExportArguments, RLHFArguments, get_supported_tuners
@@ -459,6 +461,9 @@ class LLMTrain(BaseUI):
             if is_torch_npu_available():
                 cuda_param = f'ASCEND_RT_VISIBLE_DEVICES={gpus}'
                 all_envs['ASCEND_RT_VISIBLE_DEVICES'] = gpus
+            elif is_torch_supa_available():
+                cuda_param = f'SUPA_VISIBLE_DEVICES={gpus}'
+                all_envs['SUPA_VISIBLE_DEVICES'] = gpus
             elif is_torch_cuda_available():
                 cuda_param = f'CUDA_VISIBLE_DEVICES={gpus}'
                 all_envs['CUDA_VISIBLE_DEVICES'] = gpus

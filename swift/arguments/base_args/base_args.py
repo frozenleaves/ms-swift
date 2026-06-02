@@ -51,6 +51,7 @@ class BaseArguments(GenerationArguments, QuantizeArguments, DataArguments, Templ
             (e.g., '{"key": "value"}'). It's recommended to use the same arguments for inference as for training.
             Default is None.
         enable_npu_model_patch (bool): Whether to enable model-related NPU patches. Default is True.
+        enable_supa_model_patch (bool): Whether to enable model-related SUPA patches. Default is True.
         load_args (bool): Whether to load `args.json` from a checkpoint when using `--resume_from_checkpoint`,
             `--model`, or `--adapters`. Defaults to True for inference/export and False for training. Usually,
             this does not need to be modified. Default is True.
@@ -65,7 +66,7 @@ class BaseArguments(GenerationArguments, QuantizeArguments, DataArguments, Templ
         hub_token (Optional[str]): The authentication token for ModelScope or Hugging Face Hub. Default is None.
         ddp_timeout (int): Timeout for DDP (Distributed Data Parallel) operations, in seconds. Default is 18000000.
         ddp_backend (Optional[str]): The backend for DDP. Choices include "nccl", "gloo", "mpi", "ccl", "hccl",
-            "cncl", "mccl". If None, it will be automatically selected. Default is None.
+            "cncl", "mccl", "bccl". If None, it will be automatically selected. Default is None.
         ignore_args_error (bool): Whether to ignore argument errors. This is useful for compatibility with Jupyter
             notebooks. Default is False.
         use_swift_lora (bool): Whether to use swift lora. This is a compatible argument. Default is False.
@@ -80,6 +81,7 @@ class BaseArguments(GenerationArguments, QuantizeArguments, DataArguments, Templ
     seed: int = 42
     model_kwargs: Optional[Union[dict, str]] = None
     enable_npu_model_patch: bool = True
+    enable_supa_model_patch: bool = True
     load_args: bool = True
     load_data_args: bool = False
     # dataset

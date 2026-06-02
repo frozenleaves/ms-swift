@@ -90,6 +90,8 @@ class ResourcePool:
         from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
         from transformers.utils import is_torch_npu_available
 
+        from swift.utils import is_torch_supa_available
+
         @ray.remote(num_gpus=0.01, num_cpus=0.01)
         def _probe_bundle():
             ctx = ray.get_runtime_context()
@@ -116,7 +118,12 @@ class ResourcePool:
             for r in results:
                 all_infos.append(r)
 
-        vis_key = 'ASCEND_RT_VISIBLE_DEVICES' if is_torch_npu_available() else 'CUDA_VISIBLE_DEVICES'
+        if is_torch_npu_available():
+            vis_key = 'ASCEND_RT_VISIBLE_DEVICES'
+        elif is_torch_supa_available():
+            vis_key = 'SUPA_VISIBLE_DEVICES'
+        else:
+            vis_key = 'CUDA_VISIBLE_DEVICES'
         parent_cvd = os.environ.get(vis_key, '')
         if parent_cvd:
             phys_ids = [x.strip() for x in parent_cvd.split(',')]

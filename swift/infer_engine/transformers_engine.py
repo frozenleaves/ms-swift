@@ -18,6 +18,8 @@ from torch import nn
 from tqdm import tqdm
 from transformers import GenerationConfig, LogitsProcessorList
 from transformers.utils import is_torch_npu_available
+
+from swift.utils import is_torch_supa_available
 from typing import Any, AsyncIterator, Dict, Iterator, List, Optional, Union
 
 from swift.metrics import Metric
@@ -251,6 +253,8 @@ class TransformersEngine(InferEngine):
         def _model_generate(**kwargs):
             if is_torch_npu_available():
                 torch.npu.set_device(self.model.device)
+            elif is_torch_supa_available():
+                torch.supa.set_device(self.model.device)
             self.template.generate(self.model, **kwargs)
 
         generate_kwargs = self.template.prepare_generate_kwargs(generate_kwargs, model=self.model)

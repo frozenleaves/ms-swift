@@ -23,7 +23,7 @@ import torch
 from transformers.utils import is_torch_npu_available
 from typing import Any, Dict, List, Optional, Tuple
 
-from swift.utils import gc_collect, get_logger
+from swift.utils import gc_collect, get_logger, is_torch_supa_available
 from ..checkpoint_engine import CheckpointEngineMixin
 
 logger = get_logger()
@@ -60,7 +60,12 @@ class VllmServer(CheckpointEngineMixin):
         self._gpus_per_node = gpus_per_node
 
         if cuda_visible_devices:
-            key = 'ASCEND_RT_VISIBLE_DEVICES' if is_torch_npu_available() else 'CUDA_VISIBLE_DEVICES'
+            if is_torch_npu_available():
+                key = 'ASCEND_RT_VISIBLE_DEVICES'
+            elif is_torch_supa_available():
+                key = 'SUPA_VISIBLE_DEVICES'
+            else:
+                key = 'CUDA_VISIBLE_DEVICES'
             os.environ[key] = cuda_visible_devices
 
         self._server_address = None

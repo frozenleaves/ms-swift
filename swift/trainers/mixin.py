@@ -612,11 +612,14 @@ class SwiftMixin:
         }
         if torch.cuda.is_available():
             if self.args.parallel_mode == ParallelMode.DISTRIBUTED:
-                # In non distributed, we save the global
-                # CUDA RNG state (will take care of DataParallel)
                 rng_states['cuda'] = torch.cuda.random.get_rng_state_all()
             else:
                 rng_states['cuda'] = torch.cuda.random.get_rng_state()
+        elif hasattr(torch, 'supa') and torch.supa.is_available():
+            if self.args.parallel_mode == ParallelMode.DISTRIBUTED:
+                rng_states['supa'] = torch.supa.random.get_rng_state_all()
+            else:
+                rng_states['supa'] = torch.supa.random.get_rng_state()
 
         # A process can arrive here before the process 0 has a chance to
         # save the model, in which case output_dir may not yet exist.

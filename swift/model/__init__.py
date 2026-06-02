@@ -1,6 +1,8 @@
 # Copyright (c) ModelScope Contributors. All rights reserved.
 from transformers.utils import is_torch_npu_available
 
+from swift.utils import is_torch_supa_available
+
 from . import models
 from .constant import LLMModelType, MLLMModelType, ModelType
 from .model_arch import MODEL_ARCH_MAPPING, ModelArch, ModelKeys, MultiModelKeys, get_model_arch, register_model_arch
@@ -12,3 +14,6 @@ from .utils import get_ckpt_dir, get_default_torch_dtype, get_llm_model, save_ch
 
 if is_torch_npu_available():
     from . import npu_patcher
+
+if is_torch_supa_available():
+    from . import supa_patcher

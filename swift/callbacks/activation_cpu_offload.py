@@ -23,8 +23,19 @@ def is_torch_npu_available() -> bool:
         return False
 
 
+def is_torch_supa_available() -> bool:
+    """Check the availability of SUPA"""
+    try:
+        if hasattr(torch, 'supa') and callable(getattr(torch.supa, 'is_available', None)):
+            return torch.supa.is_available()
+        return False
+    except Exception:
+        return False
+
+
 is_cuda_available = torch.cuda.is_available()
 is_npu_available = is_torch_npu_available()
+is_supa_available = is_torch_supa_available()
 
 
 def _get_unique_tensor_key(tensor):
@@ -34,7 +45,7 @@ def _get_unique_tensor_key(tensor):
 
 def get_device_name() -> str:
     """Function that gets the torch.device based on the current machine.
-    This currently only supports CPU, CUDA, NPU.
+    This currently only supports CPU, CUDA, NPU, SUPA.
     Returns:
         device
     """
@@ -42,6 +53,8 @@ def get_device_name() -> str:
         device = 'cuda'
     elif is_npu_available:
         device = 'npu'
+    elif is_supa_available:
+        device = 'supa'
     else:
         device = 'cpu'
     return device

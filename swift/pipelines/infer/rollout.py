@@ -33,6 +33,8 @@ from itertools import chain
 from multiprocessing import Pipe, Process
 from multiprocessing.connection import Connection
 from transformers.utils import is_torch_npu_available
+
+from swift.utils import is_torch_supa_available
 from typing import Any, Dict, List, Optional, Union
 
 from swift.arguments import RolloutArguments
@@ -395,7 +397,8 @@ class WeightSyncWorkerExtension:
         device = getattr(self, 'device', None)
         if device is None:
             local_rank = getattr(self, 'local_rank', 0)
-            device = _torch.device(f'cuda:{local_rank}' if _torch.cuda.is_available() else 'cpu')
+            device = _torch.device(f'cuda:{local_rank}' if _torch.cuda.is_available() else (
+                f'supa:{local_rank}' if hasattr(_torch, 'supa') and _torch.supa.is_available() else 'cpu'))
             self.device = device
 
         tp_rank = getattr(self, 'rank', 0)
@@ -500,6 +503,8 @@ class WeightSyncWorkerExtension:
 
             if _torch.cuda.is_available():
                 _torch.cuda.synchronize()
+            elif hasattr(_torch, 'supa') and _torch.supa.is_available():
+                _torch.supa.synchronize()
 
             if is_driver:
                 socket.send(b'')  # bucket received
@@ -552,6 +557,8 @@ class WeightSyncWorkerExtension:
         ipc_collect()
         if _torch.cuda.is_available():
             _torch.cuda.empty_cache()
+        elif hasattr(_torch, 'supa') and _torch.supa.is_available():
+            _torch.supa.empty_cache()
 
 
 logger = get_logger()
@@ -591,6 +598,8 @@ def _set_visible_devices_for_dp_rank(data_parallel_rank: int, tensor_parallel_si
     def _get_device_env_var():
         if is_torch_npu_available():
             return 'ASCEND_RT_VISIBLE_DEVICES'
+        if is_torch_supa_available():
+            return 'SUPA_VISIBLE_DEVICES'
         return 'CUDA_VISIBLE_DEVICES'
 
     env_var = _get_device_env_var()

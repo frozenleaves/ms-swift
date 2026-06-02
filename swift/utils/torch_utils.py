@@ -23,6 +23,15 @@ from .logger import get_logger
 logger = get_logger()
 
 
+def is_torch_supa_available() -> bool:
+    try:
+        if hasattr(torch, 'supa') and callable(getattr(torch.supa, 'is_available', None)):
+            return torch.supa.is_available()
+        return False
+    except Exception:
+        return False
+
+
 def _find_local_mac() -> str:
     mac = uuid.getnode()
     mac_address = ':'.join(('%012x' % mac)[i:i + 2] for i in range(0, 12, 2))
@@ -32,6 +41,8 @@ def _find_local_mac() -> str:
 def synchronize(device: Union[torch.device, str, int, None] = None):
     if is_torch_npu_available():
         torch.npu.synchronize(device)
+    elif is_torch_supa_available():
+        torch.supa.synchronize(device)
     elif is_torch_cuda_available():
         torch.cuda.synchronize(device)
     else:
@@ -91,6 +102,8 @@ def get_device(local_rank: Optional[Union[str, int]] = None) -> str:
     local_rank = str(local_rank)
     if is_torch_npu_available():
         device = 'npu:{}'.format(local_rank)
+    elif is_torch_supa_available():
+        device = 'supa:{}'.format(local_rank)
     elif is_torch_mps_available():
         device = 'mps:{}'.format(local_rank)
     elif is_torch_cuda_available():
@@ -104,6 +117,8 @@ def get_device(local_rank: Optional[Union[str, int]] = None) -> str:
 def get_current_device():
     if is_torch_npu_available():
         current_device = torch.npu.current_device()
+    elif is_torch_supa_available():
+        current_device = torch.supa.current_device()
     elif is_torch_cuda_available():
         current_device = torch.cuda.current_device()
     elif is_torch_mps_available():
@@ -118,6 +133,8 @@ def get_torch_device():
         return torch.cuda
     elif is_torch_npu_available():
         return torch.npu
+    elif is_torch_supa_available():
+        return torch.supa
     elif is_torch_mps_available():
         return torch.mps
     else:
@@ -129,6 +146,8 @@ def set_device(local_rank: Optional[Union[str, int]] = None):
         local_rank = max(0, get_dist_setting()[1])
     if is_torch_npu_available():
         torch.npu.set_device(local_rank)
+    elif is_torch_supa_available():
+        torch.supa.set_device(local_rank)
     elif is_torch_cuda_available():
         torch.cuda.set_device(local_rank)
 
@@ -136,6 +155,8 @@ def set_device(local_rank: Optional[Union[str, int]] = None):
 def get_device_count() -> int:
     if is_torch_npu_available():
         return torch.npu.device_count()
+    elif is_torch_supa_available():
+        return torch.supa.device_count()
     elif is_torch_cuda_available():
         return torch.cuda.device_count()
     else:
@@ -145,6 +166,8 @@ def get_device_count() -> int:
 def empty_cache():
     if is_torch_npu_available():
         torch.npu.empty_cache()
+    elif is_torch_supa_available():
+        torch.supa.empty_cache()
     elif is_torch_mps_available():
         torch.mps.empty_cache()
     elif is_torch_cuda_available():
@@ -156,6 +179,8 @@ def ipc_collect():
         torch.cuda.ipc_collect()
     elif is_torch_npu_available():
         torch.npu.ipc_collect()
+    elif is_torch_supa_available():
+        torch.supa.ipc_collect()
 
 
 def gc_collect() -> None:
@@ -239,6 +264,8 @@ def init_process_group(backend: Optional[str] = None, timeout: int = 18000000):
     if backend is None:
         if is_torch_npu_available():
             backend = 'hccl'
+        elif is_torch_supa_available():
+            backend = 'bccl'
         elif torch.cuda.is_available():
             backend = 'nccl'
         else:
