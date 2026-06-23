@@ -84,9 +84,9 @@ Where $M = \beta \cdot P_{\text{teacher}} + (1-\beta) \cdot P_{\text{student}}$
 
 By adjusting the $\beta$ parameter, interpolation can be performed between different divergence metrics. When $\beta = 0.5$, the divergence is the standard symmetric JSD.
 
-## Three Training Modes
+## Two Training Modes
 
-GKD training has three training modes, distinguished by the source of the output sequence $y$.
+GKD training has two training modes, distinguished by the source of the output sequence $y$.
 
 ### Mode Selection Logic
 
@@ -98,12 +98,8 @@ if random() < lmbda:
     # Mode 1: On-Policy learning, output sequence sampled by student model
     y = student.generate(x)
     source = "student"
-elif seq_kd:
-    # Mode 2: Sequential KD, output sequence sampled by teacher model
-    y = teacher.generate(x)
-    source = "teacher"
 else:
-    # Mode 3: Offline learning, use output sequence from dataset
+    # Mode 2: Offline learning, use output sequence from dataset
     y = y_ground_truth
     source = "dataset"
 
@@ -123,12 +119,7 @@ Set parameter `lambda`, triggered with probability $\lambda$, using student mode
 - The student model already has certain generation capabilities
 - Want to improve model performance in real inference scenarios
 
-### Mode 2: Sequential KD (`seq_kd=True` and on-policy not triggered)
-Set parameter `seq_kd=True`, when on-policy is not triggered, use teacher model sampling
-
-**Data Source**: $y \sim P_{\text{teacher}}(\cdot | x)$
-
-### Mode 3: Offline Learning (other cases)
+### Mode 2: Offline Learning (`lmbda=0` or on-policy not triggered)
 
 **Data Source**: $y = y^* \sim \text{Dataset}$
 
@@ -146,7 +137,6 @@ We can perform GKD training by setting the following parameters:
 | `--teacher_model` | str | None | - | Teacher model path or model ID<br>*Can be omitted when using `teacher_model_server` |
 | `--beta` | float | 0.5 | [0.0, 1.0] | Divergence interpolation coefficient<br>• 0.0: Forward KL <br>• 0.5: JSD (balanced)<br>• 1.0: Reverse KL |
 | `--lmbda` | float | 0.5 | [0.0, 1.0] | On-Policy learning trigger probability<br>• 0.0: Pure Offline<br>• 0.5: Mixed strategy (**recommended**)<br>• 1.0: Pure On-Policy |
-| `--seq_kd` | bool | False | True/False | Whether to use teacher-generated sequences<br>• False: Use dataset when not on-policy<br>• True: Use teacher generation when not on-policy |
 | `--temperature` | float | 0.9 | > 0 | Generation sampling temperature, controls randomness |
 | `--sft_alpha` | float | 0 | >= 0 | Mix in a proportion of SFT loss; applied to non-student-generated completions |
 | `--max_completion_length` | int | 512 | > 0 | Maximum number of tokens during generation |
@@ -196,19 +186,19 @@ When `gkd_logits_topk` is set, you can use an external teacher model API service
 | `--teacher_model_server` | str | None | Teacher model service URL<br>e.g., `http://localhost:8000` |
 | `--gkd_logits_topk` | int | **Required** | Must be set when using external API; corresponds to the top_logprobs returned by the API |
 
-**Supported Backends**:
-- `vllm serve` (recommended)
-
-> **Note**: Only `vllm serve` is supported as the teacher server backend. The training code sends raw token IDs via the `prompt` field and uses the `prompt_logprobs` parameter in the `/v1/completions` API to obtain input token log-probabilities. This is a vLLM-native feature.
-
 **Step 1: Deploy Teacher Model Service**
 
+Using `swift deploy` (specify `--infer_backend vllm`):
+
 ```bash
-# Deploy teacher model with vllm serve
-CUDA_VISIBLE_DEVICES=0 vllm serve Qwen/Qwen2.5-14B-Instruct \
+CUDA_VISIBLE_DEVICES=0 \
+swift deploy \
+    --model Qwen/Qwen2.5-14B-Instruct \
+    --infer_backend vllm \
     --port 8000 \
-    --max-logprobs 64 \
-    --gpu-memory-utilization 0.9
+    --max_logprobs 64 \
+    --max_length 4096 \
+    --vllm_max_model_len 4096
 ```
 
 **Step 2: Start GKD Training**
@@ -225,33 +215,28 @@ swift rlhf \
     ...
 ```
 
-> **vLLM max_logprobs Limitation**:
-> - vLLM default `max_logprobs=20`, adjustable via `--max-logprobs N` parameter
-> - `gkd_logits_topk` cannot exceed the server's `max_logprobs` setting
+Script example available [here](https://github.com/modelscope/ms-swift/tree/main/examples/train/rlhf/gkd/teacher_server.sh)
 
 ## Sampling Acceleration
 
-In GKD training, there are two types of online sampling scenarios:
+In GKD training, student model online sampling involves the following scenario:
 
 1. **Student model sampling** (when `lmbda > 0`): triggered with probability $\lambda$
-2. **Teacher model sampling** (when `seq_kd=True`): triggered with probability $1-\lambda$
 
-Since the sampling process significantly slows down training speed, you can refer to the following two acceleration schemes:
+Since the sampling process significantly slows down training speed, you can refer to the following acceleration scheme:
 
 ### Solution 1: Student Model Sampling Acceleration
 
 Use vLLM as the inference backend to accelerate student model sampling. Supports two deployment modes, consistent with GRPO. Refer to [GRPO documentation](./GRPO/GetStarted/GRPO.md#cluster-support)
 
-> **Note**: vLLM acceleration only applies to student model on-policy sampling (`lmbda > 0`). Teacher model sequential KD sampling (`seq_kd=True`) currently still uses Transformers. Pre-sampling scheme is recommended.
+> **Note**: vLLM acceleration only applies to student model on-policy sampling (`lmbda > 0`).
 
 Training script reference [here](https://github.com/modelscope/ms-swift/tree/main/examples/train/rlhf/gkd/vllm_server.sh), for related parameters, please refer to [GRPO vLLM Parameters](./Command-line-parameters.md#vllm_mode).
-
-Training script using Teacher Server reference [here](https://github.com/modelscope/ms-swift/tree/main/examples/train/rlhf/gkd/teacher_server.sh).
 
 
 ### Solution 2: Teacher Model Pre-sampling
 
-For teacher model sampling (`seq_kd=True`), **pre-sampling** is recommended: first use the teacher model to offline generate high-quality data, then train.
+Use **pre-sampling**: first use the teacher model to offline generate high-quality data, then train on it as a dataset.
 
 **Step 1: Generate data using teacher model**
 ```bash
@@ -277,7 +262,6 @@ swift rlhf \
     --model OpenGVLab/InternVL3-2B-Pretrained \
     --teacher_model $teacher_model \
     --dataset 'teacher_generated_data.jsonl' \
-    --seq_kd false \
     ...
 ```
 

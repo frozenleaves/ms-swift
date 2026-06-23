@@ -509,8 +509,7 @@ def wrap_model(args, models, wrap_with_ddp: bool = True):
     for m in models:
         for param in m.parameters():
             tensor_parallel.set_defaults_if_not_set_tensor_model_parallel_attributes(param)
-        if not args.use_cpu_initialization:
-            m.cuda(torch.cuda.current_device())
+        m.cuda(torch.cuda.current_device())
     # Fp16
     config = models[0].config
     if args.fp16 or args.bf16:
@@ -518,11 +517,17 @@ def wrap_model(args, models, wrap_with_ddp: bool = True):
 
     # DDP
     if not wrap_with_ddp:
-        return
+        return models
+
     kwargs = {}
     for f in dataclasses.fields(DistributedDataParallelConfig):
         if hasattr(args, f.name):
             kwargs[f.name] = getattr(args, f.name)
+
+    # compat: SWIFT keeps the user-facing Megatron-LM arg name, while MCore
+    # DistributedDataParallelConfig expects grad_reduce_in_fp32.
+    if hasattr(args, 'accumulate_allreduce_grads_in_fp32'):
+        kwargs['grad_reduce_in_fp32'] = args.accumulate_allreduce_grads_in_fp32
     kwargs['check_for_nan_in_grad'] = True
     ddp_config = DistributedDataParallelConfig(**kwargs)
 
@@ -537,7 +542,10 @@ def wrap_model(args, models, wrap_with_ddp: bool = True):
     if not ddp_config.overlap_grad_reduce:
         ddp_config.bucket_size = None
 
-    with torch.cuda.stream(torch.cuda.Stream()):
+    # Setup stream for DDP initialization with proper synchronization.
+    ddp_stream = torch.cuda.Stream()
+    ddp_stream.wait_stream(torch.cuda.current_stream())
+    with torch.cuda.stream(ddp_stream):
         models = [
             DDP(
                 config=config,
@@ -548,6 +556,8 @@ def wrap_model(args, models, wrap_with_ddp: bool = True):
                 disable_bucketing=(model_chunk_idx > 0) or args.overlap_param_gather_with_optimizer_step,
             ) for (model_chunk_idx, model_chunk) in enumerate(models)
         ]
+    # Ensure DDP initialization completes before proceeding on the default stream.
+    torch.cuda.current_stream().wait_stream(ddp_stream)
 
     # Broadcast params from data parallel src rank to other data parallel ranks.
     if args.data_parallel_random_init:
@@ -717,7 +727,7 @@ def get_batch_on_this_cp_rank(args, batch: Dict[str, Any]):
         for key, val in batch.items():
             if key not in keys:
                 continue
-            if args.task_type == 'seq_cls' and key == 'labels':
+            if args.task_type in ('seq_cls', 'embedding', 'generative_reranker') and key == 'labels':
                 continue
             if val is not None:
                 batch[key] = split_cp_inputs(val, getattr(packed_seq_params, 'cu_seqlens_q', None), -1)

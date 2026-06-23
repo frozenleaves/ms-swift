@@ -55,7 +55,7 @@ class RLHFMegatronArgumentsMixin:
         })
     gkd_logits_topk: Optional[int] = None
     lmbda: float = 0.5  # On-policy probability: with prob lmbda, use student-generated responses
-    seq_kd: bool = False  # Sequential KD: use teacher-generated responses when not on-policy
+    seq_kd: bool = False  # Deprecated
     offload_teacher_model: bool = False  # Offload teacher model to CPU to save GPU memory
     sft_alpha: float = 0.0  # Weight for SFT loss in GKD (0 = pure JSD, >0 = JSD + sft_alpha * SFT)
 
@@ -246,6 +246,10 @@ class RLHFMegatronArgumentsMixin:
             # Validate gkd_logits_topk
             if self.gkd_logits_topk is not None and self.gkd_logits_topk <= 0:
                 raise ValueError(f'gkd_logits_topk must be a positive integer, got {self.gkd_logits_topk}')
+
+            # seq_kd (teacher-generated responses) is not implemented; raise early.
+            if self.seq_kd:
+                raise NotImplementedError('seq_kd=True (Sequential KD with teacher generation) is not supported.')
 
             self.num_generations = 1
             self._init_generation_batch_params()
@@ -440,7 +444,7 @@ class MegatronArguments(RLHFMegatronArgumentsMixin, MegatronTunerMixin):
     apply_rope_fusion: bool = False
     gradient_accumulation_fusion: bool = True
     cross_entropy_loss_fusion: bool = True
-    cross_entropy_fusion_impl: Optional[Literal['native', 'te']] = None
+    cross_entropy_fusion_impl: Literal['native', 'te'] = 'native'
     calculate_per_token_loss: Optional[bool] = None
     attention_backend: str = 'flash'  # flash, fused, unfused, local, auto
     optimizer: Literal['adam', 'sgd', 'muon', 'dist_muon'] = 'adam'
@@ -497,9 +501,11 @@ class MegatronArguments(RLHFMegatronArgumentsMixin, MegatronTunerMixin):
     muon_use_nesterov: bool = False
     muon_scale_mode: Literal['spectral', 'unit_rms_norm', 'shape_scaling'] = 'spectral'
     muon_fp32_matmul_prec: Literal['low', 'medium', 'high'] = 'medium'
+    muon_coefficient_type: str = 'quintic'
     muon_num_ns_steps: int = 5
     muon_tp_mode: Literal['blockwise', 'duplicated', 'distributed'] = 'blockwise'
     muon_extra_scale_factor: float = 1.
+    muon_scalar_optimizer: str = 'adam'
 
     # checkpoint
     output_dir: Optional[str] = None
@@ -535,6 +541,7 @@ class MegatronArguments(RLHFMegatronArgumentsMixin, MegatronTunerMixin):
     account_for_embedding_in_pipeline_split: bool = False
     account_for_loss_in_pipeline_split: bool = False
     overlap_p2p_comm: bool = True
+    batch_p2p_comm: Optional[bool] = None
     align_param_gather: bool = True
 
     sequence_parallel: bool = False
@@ -590,7 +597,7 @@ class MegatronArguments(RLHFMegatronArgumentsMixin, MegatronTunerMixin):
     moe_enable_deepep: bool = False
     moe_grouped_gemm: bool = True
     moe_permute_fusion: bool = False
-    moe_aux_loss_coeff: float = 0.
+    moe_aux_loss_coeff: List[float] = 0.
     moe_z_loss_coeff: Optional[float] = None
     moe_shared_expert_overlap: bool = False
     moe_layer_recompute: bool = False  # compat mcore 0.12
@@ -635,6 +642,7 @@ class MegatronArguments(RLHFMegatronArgumentsMixin, MegatronTunerMixin):
 
     # other
     megatron_extra_kwargs: Optional[Union[dict, str]] = None
+    language_model_only: bool = False
     check_model: bool = True
     torch_dtype: Optional[Union[torch.dtype, str]] = None
     rope_scaling: Optional[Union[dict, str]] = None
@@ -646,6 +654,10 @@ class MegatronArguments(RLHFMegatronArgumentsMixin, MegatronTunerMixin):
     task_type: Literal['causal_lm', 'seq_cls', 'embedding', 'generative_reranker'] = None
     num_labels: Optional[int] = None
     problem_type: Literal['regression', 'single_label_classification', 'multi_label_classification'] = None
+    # embedding (Matryoshka Representation Learning)
+    # Dict[int, float], where the key is the embedding dimension and the value is the corresponding loss weight,
+    # e.g. '{"32": 1.0, "64": 1.0, "128": 1.0}'.
+    mrl_dims: Optional[Union[dict, str]] = None
     save_strategy: Literal['steps', 'epoch'] = 'steps'
     callbacks: List[str] = field(default_factory=list)
 
@@ -670,11 +682,6 @@ class MegatronArguments(RLHFMegatronArgumentsMixin, MegatronTunerMixin):
         return res
 
     def _set_default(self):
-        if self.mlp_padding_free:
-            if self.context_parallel_size > 1:
-                require_version(
-                    'mcore-bridge>=1.4.0.dev',
-                    'Please install mcore-bridge>=1.4.0.dev to use mlp_padding_free with context parallel.')
         if self.local_rank is None:
             self.local_rank = get_dist_setting()[1]
         if self.lr is None:
@@ -695,7 +702,11 @@ class MegatronArguments(RLHFMegatronArgumentsMixin, MegatronTunerMixin):
             os.environ['NVTE_APPLY_QK_LAYER_SCALING'] = '1'
 
     def _check_mcore_bridge(self):
-        pass
+        if self.language_model_only:
+            require_version('mcore-bridge>=1.4.3', 'Please install "mcore-bridge>=1.4.3" to use language_model_only.')
+            if self.tuner_type == 'lora_llm':
+                raise ValueError('`tuner_type="lora_llm"` is not supported when `language_model_only=True`. '
+                                 'Please use `tuner_type="lora"` instead.')
 
     def __post_init__(self):
         if self.tuner_type != 'full':
@@ -715,15 +726,6 @@ class MegatronArguments(RLHFMegatronArgumentsMixin, MegatronTunerMixin):
         self._init_vpp_size()
         if self.vit_gradient_checkpointing is None:
             self.vit_gradient_checkpointing = not self.freeze_vit
-        if self.cross_entropy_fusion_impl is None:
-            if is_torch_npu_available():
-                self.cross_entropy_fusion_impl = 'native'
-            else:
-                import transformer_engine
-                if version.parse(transformer_engine.__version__) >= version.parse('2.8.0'):
-                    self.cross_entropy_fusion_impl = 'te'
-                else:
-                    self.cross_entropy_fusion_impl = 'native'
         if isinstance(self.report_to, str):
             self.report_to = [self.report_to]
         self.model_info, self.model_meta = get_model_info_meta(
@@ -749,6 +751,9 @@ class MegatronArguments(RLHFMegatronArgumentsMixin, MegatronTunerMixin):
 
         if self.megatron_extra_kwargs is not None:
             self.megatron_extra_kwargs = json_parse_to_dict(self.megatron_extra_kwargs)
+        if self.mrl_dims is not None:
+            self.mrl_dims = json_parse_to_dict(self.mrl_dims)
+            self.mrl_dims = {int(k): float(v) for k, v in self.mrl_dims.items()}
         if self.task_type not in {'causal_lm', 'generative_reranker'}:
             self.untie_embeddings_and_output_weights = True
         if self.vit_gradient_checkpointing_kwargs is not None:
@@ -793,15 +798,41 @@ class MegatronArguments(RLHFMegatronArgumentsMixin, MegatronTunerMixin):
         self._init_multimodal_full()
         self._map_dtype()
         self._init_weigh_decay()
-        self.attention_backend = AttnBackend[self.attention_backend]
+        self._init_attention_backend()
         if self.sequence_parallel and self.tensor_model_parallel_size <= 1:
             self.sequence_parallel = False
+        if isinstance(self.moe_aux_loss_coeff, list) and len(self.moe_aux_loss_coeff) == 1:
+            self.moe_aux_loss_coeff = self.moe_aux_loss_coeff[0]
+        if isinstance(self.moe_router_load_balancing_type, list) and len(self.moe_router_load_balancing_type) == 1:
+            self.moe_router_load_balancing_type = self.moe_router_load_balancing_type[0]
         if self.tp_comm_overlap and not self.sequence_parallel:
             raise ValueError('Tensor parallel communication/GEMM overlap can happen only when '
                              'sequence parallelism is enabled')
 
         self._init_distributed()
         self._check_muon()
+
+    def _init_attention_backend(self):
+        if self.attention_backend.startswith('flash_'):
+            from transformer_engine.pytorch.attention.dot_product_attention.utils import FlashAttentionUtils as fa_utils
+
+            fa_version = int(self.attention_backend[len('flash_'):])
+            assert fa_version in (2, 3, 4), (f'Unsupported flash attention version: {fa_version}. '
+                                             f'Supported: flash_2, flash_3, flash_4.')
+            available = {2: fa_utils.is_installed, 3: fa_utils.v3_is_installed, 4: fa_utils.v4_is_installed}
+            if not available[fa_version]:
+                raise ValueError(f'flash-attn v{fa_version} is not installed. '
+                                 f'Detected installations: FA2={available[2]}, FA3={available[3]}, FA4={available[4]}.')
+
+            if fa_version != 2:
+                fa_utils.is_installed = False
+            if fa_version != 3:
+                fa_utils.v3_is_installed = False
+            if fa_version != 4:
+                fa_utils.v4_is_installed = False
+            logger.info(f'Forcing Flash Attention v{fa_version} as the attention backend.')
+            self.attention_backend = 'flash'
+        self.attention_backend = AttnBackend[self.attention_backend]
 
     def _init_distributed(self):
         initialize_megatron(self)
@@ -841,6 +872,8 @@ class MegatronArguments(RLHFMegatronArgumentsMixin, MegatronTunerMixin):
                     'Muon optimizer does not support overlap param gather. Use dist_muon instead.')
             # Muon optimizer does not support distributed optimizer for now.
             self.use_distributed_optimizer = False
+            # compat mcore 0.17
+            self.muon_nesterov = self.muon_use_nesterov
 
     def _init_teacher_model(self):
         if self.teacher_model is None:
@@ -872,6 +905,8 @@ class MegatronArguments(RLHFMegatronArgumentsMixin, MegatronTunerMixin):
         if self.virtual_pipeline_model_parallel_size is None:
             self.overlap_p2p_comm = False
             self.align_param_gather = False
+        if self.batch_p2p_comm is None:
+            self.batch_p2p_comm = not self.overlap_p2p_comm
 
     def _load_adapter_config(self):
         assert len(self.adapters) == 1, 'Currently only support one adapter'
@@ -933,7 +968,7 @@ class MegatronArguments(RLHFMegatronArgumentsMixin, MegatronTunerMixin):
 
     def _init_multimodal_full(self):
         visual_cls = self.megatron_model_meta.visual_cls
-        if self.tuner_type == 'full' and self.is_multimodal and visual_cls is not None:
+        if self.tuner_type == 'full' and self.is_multimodal and visual_cls is not None and not self.language_model_only:
             vision_tower = [f'visual.{vit}' for vit in getattr(visual_cls, '_vision_tower', [])]
             aligner = [f'visual.{aligner}' for aligner in getattr(visual_cls, '_aligner', [])]
             generator = [f'visual.{generator}' for generator in getattr(visual_cls, '_generator', [])]

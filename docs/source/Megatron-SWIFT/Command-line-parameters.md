@@ -3,7 +3,7 @@
 ## Megatron参数
 
 **训练参数**:
-- 🔥micro_batch_size: 每个device的批次大小，默认为1。
+- 🔥micro_batch_size: 每个DP组的批次大小，默认为1。
 - 🔥global_batch_size: 总批次大小，等价于`micro_batch_size*数据并行大小*梯度累加步数`。默认为16。
   - 其中，`数据并行大小 (DP) = 总GPU数 / (TP × PP × CP)`。
 - 🔥recompute_granularity: 重新计算激活的粒度，可选项为'full', 'selective' and 'none'。其中full代表重新计算整个transformer layer，selective代表只计算transformer layer中的核心注意力部分。通常'selective'是推荐的。默认为'selective'。
@@ -26,10 +26,11 @@
 - apply_rope_fusion: 默认为False。用于开启rope融合。该参数为megatron-core参数透传。注意：并不是所有情况都支持rope融合，例如：MLA、mrope等不支持。
 - gradient_accumulation_fusion: 默认为True。用于开启梯度累加融合。
 - 🔥cross_entropy_loss_fusion: 启动交叉熵损失计算融合。默认为True。
-- cross_entropy_fusion_impl: 交叉熵损失融合的实现。可选为'native'和'te'。默认为None，如果是cuda设置为'te'，npu设置为'native'。
+- cross_entropy_fusion_impl: 交叉熵损失融合的实现。可选为'native'和'te'。默认为'native'。
+  - **"ms-swift>=4.3.1"默认值从"te"修改为"native"**，原因查看[这个PR](https://github.com/NVIDIA/Megatron-LM/pull/5115)，这可能会导致更多的显存占用。
 - calculate_per_token_loss: 根据全局批次中的非填充token数量来对交叉熵损失进行缩放。默认为None，`task_type`为'causal_lm'且为预训练/微调时，默认为True，否则默认为False。
-- 🔥attention_backend: 使用的注意力后端 (flash、fused、unfused、local、auto)。默认为 flash。
-  - 如果安装'flash_attention_3'，`--attention_backend flash`则优先使用fa3。训练脚本参考[这里](https://github.com/modelscope/ms-swift/tree/main/examples/train/flash_attention_3)。多模态模型的vit部分要使用flash_attention_3，请设置`--attn_impl flash_attention_3`。
+- 🔥attention_backend: 使用的注意力后端 (flash、fused、unfused、local、auto、flash_2、flash_3、flash_4)。默认为 flash。
+  - 如果安装'flash_attention_4/3'，`--attention_backend flash`则优先使用fa4/fa3。如果要显式设置，你可以设置`--attention_backend flash_2/3/4`。训练脚本参考[这里](https://github.com/modelscope/ms-swift/tree/main/examples/train/flash_attention_3)。多模态模型的vit部分要使用flash_attention_4/3，请设置`--attn_impl flash_attention_4/3`。
   - 有些模型可能不支持flash，你需要手动设置`--attention_backend unfused/fused --padding_free false`，例如：Llama4、GPT-OSS。
 - optimizer: 优化器类型，可选为'adam'、'sgd'、'muon'和'dist_muon'。默认为adam。
   - 注意：此'adam'为'adamw'，参考[这里](https://github.com/NVIDIA/TransformerEngine/blob/d8f1e68f7c414f3e7985a8b41de4443b2f819af3/transformer_engine/pytorch/optimizers/fused_adam.py#L69-L70)。
@@ -98,9 +99,11 @@
 - muon_use_nesterov: 是否在内部 SGD 中使用 Nesterov 风格的动量，默认为False。
 - muon_scale_mode: Muon 优化器的缩放模式。可选为'spectral', 'unit_rms_norm', 'shape_scaling'。默认为'spectral'。
 - muon_fp32_matmul_prec: Newton-Schulz 迭代的 FP32 矩阵乘法精度，可选为'low', 'medium', 'high'。默认为'medium'。
+- muon_coefficient_type: Muon 优化器 Newton-Schulz 迭代的系数类型，传递给 Megatron 的 `--muon-coefficient-type`。可选值取决于所安装的 emerging_optimizers 版本（如'quintic', 'polar_express', 'simple', 'cans', 'aol', 'deepseekv4', 'cubic5', 'custom'）。默认为'quintic'。
 - muon_num_ns_steps: Muon 优化器的 Newton-Schulz 步数。默认为5。
 - muon_tp_mode: 张量模型并行权重的 NS 计算方式。可选为'blockwise', 'duplicated', 'distributed'。默认为'blockwise'。
 - muon_extra_scale_factor: Muon 更新的额外缩放因子，默认为1。
+- muon_scalar_optimizer: 使用 Muon 时非线性参数（embeddings、biases、norms）的优化器，可选为'adam'或'lion'。默认为'adam'。
 
 
 **checkpoint参数**:
@@ -144,6 +147,8 @@
   - 该参数通常用于**Transformer层数无法被PP整除**，或者多模态模型第0个pp阶段显存占用过高的情况。
 - 🔥decoder_last_pipeline_num_layers: decoder最后一个流水线阶段所包含的Transformer层数。默认为 None，表示将Transformer层数平均分配到所有流水线阶段。
 - overlap_p2p_comm: 在 1F1B 中将流水线并行通信与前向和反向块重叠，默认为True。
+- batch_p2p_comm: 使用 batch_isend_irecv 代替单独的 isend/irecv 调用。默认为None，设置为`not args.overlap_p2p_comm`。
+  - 如果出现PP并行卡住的情况，可以设置为False。
 - align_param_gather: 设置为True，所有 PP 阶段将同时启动参数全收集（all-gather）操作。否则，每个 PP 阶段将根据需要独立启动。默认为True。
 - 🔥sequence_parallel: 启动序列并行优化，该参数需要设置`tensor_model_parallel_size`才生效。默认为False。
 - 🔥context_parallel_size: cp数，默认为1。
@@ -194,14 +199,13 @@
 - accumulate_allreduce_grads_in_fp32: 在 fp32 精度下进行梯度累积和全规约操作。如果开启`--bf16`且`main_params_dtype`为'fp32'，则设置为True。否则默认设置为False。
 
 **MoE参数**:
-- moe_router_load_balancing_type: 确定路由器的负载均衡策略。可选项为"aux_loss"、"seq_aux_loss"、"global_aux_loss"、"sinkhorn"、"none"。默认值为 None。从config.json中读取。
+- moe_router_load_balancing_type: 确定路由器的负载均衡策略。可选项为"aux_loss"、"seq_aux_loss"、"global_aux_loss"、"sinkhorn"、"none"。支持单/多种策略的列表（如 `--moe_router_load_balancing_type seq_aux_loss global_aux_loss`）。默认值为 None。从config.json中读取。
 - 🔥moe_router_dtype: 用于路由计算和专家输出加权平均的数据类型。可选为'none', 'fp32'、'fp64'，这增强了数值稳定性，尤其是在专家数量较多时。与`moe_permute_fusion`一起使用时，性能影响可以忽略不计。默认为'fp32'。'none'代表不改变数据类型。
 - moe_token_dispatcher_type: 要使用的token分发器类型。可选选项包括 'allgather'、'alltoall'、'flex'和'alltoall_seq'。默认值为'alltoall'。
 - moe_enable_deepep: 启用 DeepEP 以实现 MoE 模型中的高效 token 调度和合并。仅在通过设置 `--moe_token_dispatcher_type flex` 使用弹性 token 调度器时有效。
 - 🔥moe_grouped_gemm: 当每个rank包含多个专家时，通过在多个流中启动多个本地 GEMM 内核，利用 TransformerEngine中的GroupedLinear提高利用率和性能。默认为True。
 - 🔥moe_permute_fusion: 在令牌分发过程中融合令牌重排操作。默认为False。
-- 🔥moe_aux_loss_coeff: 默认为0，不使用aux_loss。通常情况下，该值设置的越大，训练效果越差，但MoE负载越均衡，请根据实验效果，选择合适的值。
-  - 注意：moe_aux_loss在`padding_free`为 False 的情况下，"megatron-core<0.16"存在对padding token计算routing loss的情况，参考[这个PR](https://github.com/NVIDIA/Megatron-LM/pull/2142)。此外请使用"mcore-bridge>=1.4.0.dev"，参考[这个PR](https://github.com/modelscope/mcore-bridge/pull/79)。
+- 🔥moe_aux_loss_coeff: 默认为0，不使用aux_loss。支持单/多个浮点数的列表 ，对应`moe_router_load_balancing_type` 中各策略。通常情况下，该值设置的越大，训练效果越差，但MoE负载越均衡，请根据实验效果，选择合适的值。
 - moe_z_loss_coeff: z-loss 的缩放系数。默认为None。
 - 🔥moe_shared_expert_overlap: 启用共享专家计算与调度器通信之间的重叠。如果不启用此选项，共享专家将在路由专家之后执行。仅在设置了`moe_shared_expert_intermediate_size`时有效。默认为False。
 - 🔥moe_expert_capacity_factor: 每个专家的容量因子，None表示不会丢弃任何token。默认为None。通过设置 `--moe_expert_capacity_factor`，超出专家容量的 token 会基于其被选中的概率被丢弃。可以**令训练负载均匀，提升训练速度**（例如设置为1或2）。
@@ -219,9 +223,8 @@ mHC 模块以在支持的 GPU 上获得更好的性能。需要安装 cuTile；�
 - mhc_recompute_layer_num: 每个 MHC 重计算块的层数。设置后，每 `mhc_recompute_layer_num` 层构成一个重计算块。若为 None，Transformer 块中的所有层共享单个重计算块。默认为None。
 
 **MTP参数**
-- mtp_num_layers: 多token预测（MTP）层的数量。MTP将每个位置的预测范围扩展到多个未来token。此MTP实现使用D个顺序模块依次预测D个额外的token。默认为None。（需要"megatron-core>=0.14"）
-  - 注意：mtp_num_layers的值，将不自动从config.json获取，需手动设置。你可以参考config.json中的`num_nextn_predict_layers`, `mtp_num_hidden_layers`字段填写该值。使用mcore-bridge时，将优先从safetensors文件中加载MTP权重，若无法找到，则进行随机初始化。（若要使用blockwise fp8 + mtp，请使用mcore>=0.15）
-  - 多模态MTP的支持: 需安装"mcore-bridge>=1.1.0"。
+- mtp_num_layers: 多token预测（MTP）层的数量。MTP将每个位置的预测范围扩展到多个未来token。此MTP实现使用D个顺序模块依次预测D个额外的token。默认为None。
+  - 注意：mtp_num_layers的值，将不自动从config.json获取，需手动设置。你可以参考config.json中的`num_nextn_predict_layers`, `mtp_num_hidden_layers`字段填写该值。使用mcore-bridge时，将优先从safetensors文件中加载MTP权重，若无法找到，则进行随机初始化。
 - mtp_loss_scaling_factor: 多token预测（MTP）损失的缩放因子。我们计算所有深度上MTP损失的平均值，然后乘以该缩放因子得到总体MTP损失，它将作为一个额外的训练目标。默认为0.1。
 - mtp_decoder_input_detach: 用来控制 MTP 分支里的 decoder_input 是否停止梯度。默认为False。开启后，MTP loss 不会直接通过 decoder_input 回传到 embedding/vit，但仍会通过 hidden_states 路径更新主干。
 - mtp_shared_weights: MTP层之间共享权重，采用GLM-5使用的mtp方案。默认为False。例如你可以设置`--mtp_num_layers 3 --mtp_shared_weights true`。
@@ -280,6 +283,7 @@ lora训练：
 
 **其他参数**:
 - megatron_extra_kwargs: 透传入Megatron的其他参数（透传入[mcore-bridge](https://github.com/modelscope/mcore-bridge/blob/78cb9be33ebad69a0d940a2bc4e198f866084b70/src/mcore_bridge/config/model_config.py#L116)的 `ModelConfig` 类，继承自 megatron-core 的 TransformerConfig），也可用于覆盖自动读取的`config.json`参数。传入json字符串。默认为None。
+- language_model_only: 只训练多模态模型的语言模型部分，并且只会加载和保存语言模型部分。默认为False。（需"mcore-bridge>=1.4.3"）
 - check_model: 检查本地模型文件有损坏或修改并给出提示，默认为True。**如果是断网环境，请设置为False**。
 - rope_scaling: rope_scaling相关参数，默认为None。格式参考[llama3.1 config.json](https://modelscope.cn/models/LLM-Research/Meta-Llama-3.1-8B-Instruct/file/view/master?fileName=config.json&status=1)，传入json字符串。
   - **目前rope_scaling模块使用transformers实现，支持transformers支持的所有rope_scaling。**
@@ -290,6 +294,8 @@ lora训练：
 - 🔥task_type: 默认为'causal_lm'。可选为'causal_lm'、'seq_cls'、'embedding'和'generative_reranker'。
 - num_labels: 分类模型（即`--task_type seq_cls`）需要指定该参数。代表标签数量，默认为None。
 - problem_type: 分类模型（即`--task_type seq_cls`）需要指定该参数。可选为'regression', 'single_label_classification', 'multi_label_classification'。默认为None，若模型为 reward_model 或 num_labels 为1，该参数为'regression'，其他情况，该参数为'single_label_classification'。
+- mrl_dims: Embedding训练的[Matryoshka表征学习（MRL）](https://arxiv.org/abs/2205.13147)维度配置，默认为None。格式为`Dict[int, float]`或Json字符串，key为截断的embedding维度，value为该维度对应的loss权重，例如`'{"32": 1.0, "64": 1.0, "128": 1.0}'`。开启后，trainer会对`last_hidden_state`分别截断到每个维度并做L2归一化，再调用`loss_type`对应的loss加权累加。仅在`task_type='embedding'`下生效。
+  - 注意：可支持的最大embedding维度由模型`config.json`中的`hidden_size`决定，key大于`hidden_size`的KV对将被自动忽略。
 - 🔥save_strategy: 保存策略，可选项为'steps'和'epoch'。默认为'steps'。当设置为'epoch'时，会根据数据集大小自动计算`save_steps`和`eval_steps`以实现每个epoch保存一次，用户传入的`save_steps`和`eval_steps`参数值将被忽略。
 - callbacks: 自定义trainer callback，默认为`[]`。
 
@@ -399,7 +405,6 @@ Megatron训练参数继承自Megatron参数和基本参数（**与ms-swift共用
 - teacher_model_revision: 教师模型版本，默认为None。
 - beta: JSD 散度插值系数。0.0 代表 Forward KL，0.5 代表对称 JSD，1.0 代表 Reverse KL。默认为0.5。
 - lmbda: On-Policy 学习触发概率。0.0 代表纯 Off-Policy，1.0 代表纯 On-Policy。默认为0.5。
-- seq_kd: 是否使用教师生成的响应（Sequential KD），当前暂不支持。默认为False。
 - temperature: 用于采样和损失计算的温度参数。默认为0.9。
 - offload_teacher_model: 是否将教师模型卸载到 CPU 以节省 GPU 显存。默认为False。
 - sft_alpha: SFT 损失的混合系数，`loss = jsd_loss + sft_alpha * sft_loss`。当使用数据集响应（Off-Policy）时生效。默认为0。

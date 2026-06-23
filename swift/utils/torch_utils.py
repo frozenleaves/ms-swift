@@ -16,11 +16,43 @@ from modelscope.hub.utils.utils import get_cache_dir
 from transformers.utils import is_torch_cuda_available, is_torch_mps_available, is_torch_npu_available
 from typing import Any, Mapping, Optional, Union
 
-from swift.utils import is_mp
-from .env import get_dist_setting, get_node_setting, is_dist, is_local_master, is_master
-from .logger import get_logger
+from .env import get_dist_setting, get_node_setting, is_dist, is_local_master, is_master, is_mp
 
-logger = get_logger()
+
+def nanstd(tensor: torch.Tensor, dim: Optional[Union[int, tuple]] = None, keepdim: bool = False) -> torch.Tensor:
+    """Compute the standard deviation of a tensor, ignoring NaNs.
+
+    Refer: trl/trainer/utils.py
+
+    Args:
+        tensor (`torch.Tensor`):
+            Input tensor.
+        dim (`int` or `tuple[int, ...]`, *optional*):
+            Dimension to reduce. Defaults to all dimensions.
+        keepdim (`bool`, *optional*, defaults to `False`):
+            Whether to keep reduced dimensions.
+
+    Returns:
+        `torch.Tensor`:
+            Standard deviation of the tensor, ignoring NaNs.
+    """
+    mean = torch.nanmean(tensor, dim=dim, keepdim=True)
+    variance = torch.nanmean((tensor - mean)**2, dim=dim, keepdim=True)
+    count = torch.sum(~torch.isnan(tensor), dim=dim, keepdim=True)
+    correction = count / (count - 1)
+    correction = torch.where(count > 1, correction, torch.full_like(correction, float('nan')))
+    variance *= correction  # Bessel's correction
+    std = torch.sqrt(variance)
+    if keepdim:
+        return std
+    if dim is None:
+        return std.squeeze()
+    if isinstance(dim, int):
+        return std.squeeze(dim)
+    dims = [(d if d >= 0 else d + std.ndim) for d in dim]
+    for d in sorted(dims, reverse=True):
+        std = std.squeeze(d)
+    return std
 
 
 def is_torch_supa_available() -> bool:

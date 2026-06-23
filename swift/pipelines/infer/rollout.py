@@ -44,11 +44,11 @@ from swift.infer_engine.protocol import (InitCommunicatorRequest, RequestConfig,
 from swift.rlhf_trainers.utils import (VLLM_LORA_INT_ID, VLLM_LORA_NAME, VLLM_LORA_PATH, FlattenedTensorBucket,
                                        FlattenedTensorMetadata, TensorLoRARequest, UpdateAdapterRequest,
                                        UpdateFlattenedAdapterRequest, UpdateFlattenedParamsRequest,
-                                       check_vllm_version_ge, chunk_list, finish_vllm_weight_reload,
-                                       patch_vllm_load_adapter, patch_vllm_moe_model_weight_loader,
-                                       vllm_supports_lora_load_inplace)
+                                       broadcast_tensor_for_vllm_weight_sync, check_vllm_version_ge, chunk_list,
+                                       finish_vllm_weight_reload, patch_vllm_load_adapter,
+                                       patch_vllm_moe_model_weight_loader, vllm_supports_lora_load_inplace)
 from swift.rollout import RolloutScheduler, multi_turns
-from swift.utils import (gc_collect, get_logger, get_seed, get_torch_device, ipc_collect, is_vllm_ascend_available,
+from swift.utils import (gc_collect, get_logger, get_seed, ipc_collect, is_vllm_ascend_available,
                          is_vllm_metax_available, synchronize)
 from ..base import SwiftPipeline
 
@@ -91,8 +91,7 @@ def _set_death_signal():
     """Ensure this process is killed when its parent exits.
 
     Prevents orphan vLLM TP worker processes from leaking GPU memory
-    when the parent Ray actor dies unexpectedly.  Adopted from verl's
-    ``set_death_signal`` utility.
+    when the parent Ray actor dies unexpectedly.
     """
     import ctypes
     import platform
@@ -103,6 +102,13 @@ def _set_death_signal():
     libc.prctl(1, signal.SIGKILL)
     if os.getppid() == 1:
         os.kill(os.getpid(), signal.SIGKILL)
+
+
+def _patch_full_weight_reload_loader(model) -> None:
+    if is_vllm_ascend_available():
+        from swift.model.npu_patch.vllm_ascend_moe import configure_vllm_ascend_moe_preprocessed_weight_sync
+        configure_vllm_ascend_moe_preprocessed_weight_sync(model)
+    patch_vllm_moe_model_weight_loader(model)
 
 
 class WeightSyncWorkerExtension:
@@ -184,13 +190,14 @@ class WeightSyncWorkerExtension:
         weight = torch.empty(shape, dtype=dtype, device=self.communicator.device)
 
         # Use NCCL to broadcast the updated weights from the client (src) to all workers.
-        self.communicator.broadcast(
-            weight, src=self.client_rank, stream=getattr(get_torch_device(), 'current_stream', lambda: None)())
+        broadcast_tensor_for_vllm_weight_sync(self.communicator, weight, src=self.client_rank)
         synchronize()
         self.communicator.group.barrier()
 
-        # Patch MoE weight_loader if needed
-        patch_vllm_moe_model_weight_loader(self.model_runner.model)
+        # Patch MoE weight_loader if needed. This endpoint updates base weights
+        # one by one, so use the same full-reload layout setup as flattened
+        # base-weight sync before the final post-load processing request.
+        _patch_full_weight_reload_loader(self.model_runner.model)
 
         # Load the received weights into the model.
         self.model_runner.model.load_weights(weights=[(name, weight)])
@@ -205,8 +212,7 @@ class WeightSyncWorkerExtension:
 
         total_bytes = metadatas[-1].end_idx
         flatten_tensor = torch.empty(total_bytes, dtype=torch.uint8, device=self.communicator.device)
-        self.communicator.broadcast(
-            flatten_tensor, src=self.client_rank, stream=getattr(get_torch_device(), 'current_stream', lambda: None)())
+        broadcast_tensor_for_vllm_weight_sync(self.communicator, flatten_tensor, src=self.client_rank)
         synchronize()
         self.communicator.group.barrier()
 
@@ -244,8 +250,7 @@ class WeightSyncWorkerExtension:
             dtype = getattr(torch, metadata['dtype'].split('.')[-1])
             shape = tuple(metadata['shape'])
             tensor = torch.empty(shape, dtype=dtype, device=self.communicator.device)
-            self.communicator.broadcast(
-                tensor, src=self.client_rank, stream=getattr(get_torch_device(), 'current_stream', lambda: None)())
+            broadcast_tensor_for_vllm_weight_sync(self.communicator, tensor, src=self.client_rank)
             named_params[name] = tensor
 
         synchronize()
@@ -279,21 +284,26 @@ class WeightSyncWorkerExtension:
         total_bytes = metadatas[-1].end_idx
         flatten_tensor = torch.empty(total_bytes, dtype=torch.uint8, device=self.communicator.device)
 
-        self.communicator.broadcast(
-            flatten_tensor, src=self.client_rank, stream=getattr(get_torch_device(), 'current_stream', lambda: None)())
+        broadcast_tensor_for_vllm_weight_sync(self.communicator, flatten_tensor, src=self.client_rank)
         synchronize()
         self.communicator.group.barrier()
 
         named_params = FlattenedTensorBucket(metadata=metadatas, flattened_tensor=flatten_tensor).reconstruct_tensors()
 
-        patch_vllm_moe_model_weight_loader(self.model_runner.model)
-        # Re-run process_weights_after_loading on FusedMoE layers so the
-        # kernel-format layout is rebuilt after the in-place reload
-        # (workaround for vLLM issue #42821).
-        try:
-            self.model_runner.model.load_weights(weights=list(named_params.items()))
-        finally:
-            finish_vllm_weight_reload(self.model_runner.model)
+        _patch_full_weight_reload_loader(self.model_runner.model)
+        self.model_runner.model.load_weights(weights=list(named_params.items()))
+
+    def process_weights_after_loading(self) -> None:
+        """Re-run process_weights_after_loading once after ALL weight
+        buckets have been loaded, so the kernel-format layout is rebuilt
+        on complete weights rather than partial ones.
+
+        Uses vLLM's built-in ``process_weights_after_loading`` when
+        *model_config* and *target_device* are available (same as verl);
+        falls back to FusedMoE-only path otherwise.
+        """
+        model_config = self.model_runner.model_config
+        finish_vllm_weight_reload(self.model_runner.model, model_config=model_config, target_device=self.device)
 
     def close_communicator(self) -> None:
         """
@@ -316,9 +326,6 @@ class WeightSyncWorkerExtension:
     # NCCL broadcast hop of ``update_flattened_params`` and reuses the
     # sender's bucket buffer via CUDA IPC (same node, same device) or
     # shared memory (CPU / cross-device fallback).
-    #
-    # Reference: twinkle ``TwinkleWorkerExtension.update_weights_from_ipc``
-    # and verl ``vLLMColocateWorkerExtension.update_weights_from_ipc``.
     #
     # TP>1:
     #   Only the TP driver (rank 0 in the TP group) talks to the ZMQ
@@ -379,7 +386,7 @@ class WeightSyncWorkerExtension:
         ``rebuild_cuda_tensor`` and reuse the cached mapping.  This avoids
         accumulating IPC mappings that the CUDA driver releases lazily,
         which is the root cause of apparent GPU memory growth under
-        frequent syncs.  (Aligned with twinkle / verl.)
+        frequent syncs.
 
         When ``peft_config`` is provided and ``base_sync_done`` is True,
         the received weights are loaded as a LoRA adapter via
@@ -475,7 +482,8 @@ class WeightSyncWorkerExtension:
         is_lora_sync = (peft_config is not None and base_sync_done)
         all_lora_weights: Dict[str, Any] = {} if is_lora_sync else None
 
-        patch_vllm_moe_model_weight_loader(self.model_runner.model)
+        if not is_lora_sync:
+            _patch_full_weight_reload_loader(self.model_runner.model)
 
         while True:
             metadata = socket.recv_pyobj() if is_driver else None
@@ -521,12 +529,13 @@ class WeightSyncWorkerExtension:
             if metadata.get('is_last'):
                 break
 
-        # Re-run process_weights_after_loading on FusedMoE layers so the
-        # kernel-format layout is rebuilt after the in-place reload
-        # (workaround for vLLM issue #42821).  Skipped for LoRA sync
-        # because the adapter path doesn't call ``load_weights``.
+        # Re-run process_weights_after_loading so the kernel-format
+        # layout is rebuilt after the in-place reload (vLLM issue
+        # #42821).  Skipped for LoRA sync because the adapter path
+        # doesn't call ``load_weights``.
         if not is_lora_sync:
-            finish_vllm_weight_reload(self.model_runner.model)
+            model_config = self.model_runner.model_config
+            finish_vllm_weight_reload(self.model_runner.model, model_config=model_config, target_device=self.device)
 
         if is_lora_sync and all_lora_weights:
             req_kw = dict(
@@ -711,6 +720,7 @@ class SwiftRolloutDeploy(SwiftPipeline):
         self.app.post('/update_adapter_flattened_param/')(self.update_adapter_flattened_param)
         self.app.post('/update_adapter_param/')(self.update_adapter_param)
         self.app.post('/update_flattened_params/')(self.update_flattened_params)
+        self.app.post('/process_weights_after_loading/')(self.process_weights_after_loading)
         self.app.post('/reset_prefix_cache/')(self.reset_prefix_cache)
         self.app.post('/reset_encoder_cache/')(self.reset_encoder_cache)
         self.app.post('/reset_mm_cache/')(self.reset_mm_cache)
@@ -938,6 +948,18 @@ class SwiftRolloutDeploy(SwiftPipeline):
             connection.send({'type': 'fire_and_forget', 'method': 'collective_rpc', 'kwargs': kwargs})
 
         return {'message': 'Request received, updating flattened parameters'}
+
+    async def process_weights_after_loading(self):
+        """
+        Triggers process_weights_after_loading on all workers.
+        """
+        kwargs = {'method': 'process_weights_after_loading', 'args': ()}
+        for connection in self.connections:
+            connection.send({'type': 'call', 'method': 'collective_rpc', 'kwargs': kwargs})
+        # Wait for all workers to complete before returning
+        loop = asyncio.get_running_loop()
+        await asyncio.gather(*(loop.run_in_executor(None, connection.recv) for connection in self.connections))
+        return {'message': 'Weights processed after loading'}
 
     async def reset_prefix_cache(self):
         """
