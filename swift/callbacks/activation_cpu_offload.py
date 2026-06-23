@@ -49,12 +49,12 @@ def get_device_name() -> str:
     Returns:
         device
     """
-    if is_cuda_available:
-        device = 'cuda'
-    elif is_npu_available:
+    if is_npu_available:
         device = 'npu'
     elif is_supa_available:
         device = 'supa'
+    elif is_cuda_available:
+        device = 'cuda'
     else:
         device = 'cpu'
     return device

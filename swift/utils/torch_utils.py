@@ -129,12 +129,12 @@ def get_current_device():
 
 
 def get_torch_device():
-    if is_torch_cuda_available():
-        return torch.cuda
-    elif is_torch_npu_available():
+    if is_torch_npu_available():
         return torch.npu
     elif is_torch_supa_available():
         return torch.supa
+    elif is_torch_cuda_available():
+        return torch.cuda
     elif is_torch_mps_available():
         return torch.mps
     else:
@@ -175,12 +175,12 @@ def empty_cache():
 
 
 def ipc_collect():
-    if is_torch_cuda_available():
-        torch.cuda.ipc_collect()
-    elif is_torch_npu_available():
+    if is_torch_npu_available():
         torch.npu.ipc_collect()
     elif is_torch_supa_available():
         torch.supa.ipc_collect()
+    elif is_torch_cuda_available():
+        torch.cuda.ipc_collect()
 
 
 def gc_collect() -> None:
