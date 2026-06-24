@@ -406,7 +406,7 @@ class WeightSyncWorkerExtension:
             local_rank = getattr(self, 'local_rank', 0)
             if _torch.cuda.is_available():
                 device = _torch.device(f'cuda:{local_rank}')
-            elif hasattr(_torch, 'supa') and _torch.supa.is_available():
+            elif is_torch_supa_available():
                 device = _torch.device(f'supa:{local_rank}')
             else:
                 device = _torch.device('cpu')
@@ -515,7 +515,7 @@ class WeightSyncWorkerExtension:
 
             if _torch.cuda.is_available():
                 _torch.cuda.synchronize()
-            elif hasattr(_torch, 'supa') and _torch.supa.is_available():
+            elif is_torch_supa_available():
                 _torch.supa.synchronize()
 
             if is_driver:
@@ -570,7 +570,7 @@ class WeightSyncWorkerExtension:
         ipc_collect()
         if _torch.cuda.is_available():
             _torch.cuda.empty_cache()
-        elif hasattr(_torch, 'supa') and _torch.supa.is_available():
+        elif is_torch_supa_available():
             _torch.supa.empty_cache()
 
 

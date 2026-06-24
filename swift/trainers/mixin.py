@@ -54,7 +54,8 @@ from swift.template import Template, update_generation_config_eos_token
 from swift.tuner_plugin import tuners_map
 from swift.tuners import SwiftModel
 from swift.utils import (HfConfigFactory, copy_files_by_pattern, deep_getattr, get_current_device, get_logger,
-                         get_packed_seq_params, is_dist, is_mp, is_mp_ddp, ms_logger_context, seed_worker)
+                         get_packed_seq_params, is_dist, is_mp, is_mp_ddp, is_torch_supa_available, ms_logger_context,
+                         seed_worker)
 from .arguments import TrainingArguments
 from .utils import (can_return_loss, dynamic_gradient_checkpointing, find_labels, get_function, get_resume_dir,
                     is_instance_of_ms_model, patch_modelscope_hub_timeout, replace_index_file)
@@ -668,7 +669,7 @@ class SwiftMixin:
                 rng_states['cuda'] = torch.cuda.random.get_rng_state_all()
             else:
                 rng_states['cuda'] = torch.cuda.random.get_rng_state()
-        elif hasattr(torch, 'supa') and torch.supa.is_available():
+        elif is_torch_supa_available():
             if self.args.parallel_mode == ParallelMode.DISTRIBUTED:
                 rng_states['supa'] = torch.supa.random.get_rng_state_all()
             else:

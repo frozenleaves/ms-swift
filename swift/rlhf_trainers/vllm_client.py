@@ -32,7 +32,8 @@ if is_vllm_available():
         import vllm_metax.patch
 
     if is_vllm_supa_available():
-        from vllm_supa.distributed.device_communicators.pybccl import PyBcclCommunicator as PyNcclCommunicator  # noqa
+        from vllm_supa.patch import apply_patches  # noqa
+        apply_patches()
 
 if is_trl_available():
     import trl
