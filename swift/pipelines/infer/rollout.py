@@ -48,8 +48,8 @@ from swift.rlhf_trainers.utils import (VLLM_LORA_INT_ID, VLLM_LORA_NAME, VLLM_LO
                                        finish_vllm_weight_reload, patch_vllm_load_adapter,
                                        patch_vllm_moe_model_weight_loader, vllm_supports_lora_load_inplace)
 from swift.rollout import RolloutScheduler, multi_turns
-from swift.utils import (empty_cache, gc_collect, get_device, get_logger, get_physical_device_count, get_seed,
-                         ipc_collect, is_torch_rocm, is_vllm_ascend_available, is_vllm_metax_available, synchronize)
+from swift.utils import (gc_collect, get_logger, get_physical_device_count, get_seed, ipc_collect, is_torch_rocm,
+                         is_vllm_ascend_available, is_vllm_metax_available, synchronize)
 from ..base import SwiftPipeline
 
 try:
@@ -404,7 +404,12 @@ class WeightSyncWorkerExtension:
         device = getattr(self, 'device', None)
         if device is None:
             local_rank = getattr(self, 'local_rank', 0)
-            device = _torch.device(get_device(local_rank))
+            if _torch.cuda.is_available():
+                device = _torch.device(f'cuda:{local_rank}')
+            elif hasattr(_torch, 'supa') and _torch.supa.is_available():
+                device = _torch.device(f'supa:{local_rank}')
+            else:
+                device = _torch.device('cpu')
             self.device = device
 
         tp_rank = getattr(self, 'rank', 0)
@@ -508,7 +513,10 @@ class WeightSyncWorkerExtension:
                     tensor = tensor.clone()
                 weights.append((name, tensor))
 
-            synchronize()
+            if _torch.cuda.is_available():
+                _torch.cuda.synchronize()
+            elif hasattr(_torch, 'supa') and _torch.supa.is_available():
+                _torch.supa.synchronize()
 
             if is_driver:
                 socket.send(b'')  # bucket received
@@ -560,7 +568,10 @@ class WeightSyncWorkerExtension:
             shm = None
         _gc.collect()
         ipc_collect()
-        empty_cache()
+        if _torch.cuda.is_available():
+            _torch.cuda.empty_cache()
+        elif hasattr(_torch, 'supa') and _torch.supa.is_available():
+            _torch.supa.empty_cache()
 
 
 logger = get_logger()
