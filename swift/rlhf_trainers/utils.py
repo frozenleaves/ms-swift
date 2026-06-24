@@ -29,8 +29,8 @@ from swift.rl_core.data import GRPOBatch, OnPolicySample
 from swift.template import Messages, Template
 from swift.tuners.lora import LoraConfig
 from swift.utils import (gc_collect, get_cu_seqlens_from_position_ids, get_logger, get_packed_seq_params,
-                         get_torch_device, is_swanlab_available, is_vllm_available, is_wandb_available, swanlab_get_run,
-                         synchronize, to_device)
+                         get_torch_device, is_swanlab_available, is_torch_supa_available, is_vllm_available,
+                         is_wandb_available, swanlab_get_run, synchronize, to_device)
 
 if is_wandb_available():
     import wandb
@@ -1632,7 +1632,7 @@ def set_expandable_segments(enable: bool) -> None:
     if torch.cuda.is_available():
         torch.cuda.memory._set_allocator_settings(f'expandable_segments:{enable}')
         os.environ['PYTORCH_CUDA_ALLOC_CONF'] = f'expandable_segments:{enable}'
-    elif hasattr(torch, 'supa') and torch.supa.is_available() and hasattr(torch.supa, 'memory'):
+    elif is_torch_supa_available():
         torch.supa.memory._set_allocator_settings(f'expandable_segments:{enable}')
 
 
