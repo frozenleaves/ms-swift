@@ -8,20 +8,10 @@ from transformers.training_args import TrainingArguments
 from transformers.utils import is_torch_npu_available
 from typing import Any, Optional
 
-from swift.utils import get_logger
+from swift.utils import get_logger, is_torch_supa_available
 from .base import TrainerCallback
 
 logger = get_logger()
-
-
-def is_torch_supa_available() -> bool:
-    """Check the availability of SUPA"""
-    try:
-        if hasattr(torch, 'supa') and callable(getattr(torch.supa, 'is_available', None)):
-            return torch.supa.is_available()
-        return False
-    except Exception:
-        return False
 
 
 is_cuda_available = torch.cuda.is_available()
