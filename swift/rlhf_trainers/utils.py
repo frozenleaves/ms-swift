@@ -1638,6 +1638,7 @@ def set_expandable_segments(enable: bool) -> None:
         os.environ['PYTORCH_CUDA_ALLOC_CONF'] = f'expandable_segments:{enable}'
     elif is_torch_supa_available():
         torch.supa.memory._set_allocator_settings(f'expandable_segments:{enable}')
+        os.environ['PYTORCH_SUPA_ALLOC_CONF'] = f'expandable_segments:{enable}'
 
 
 def peft_config_to_dict(peft_config):
