@@ -59,13 +59,8 @@ def nanstd(tensor: torch.Tensor, dim: Optional[Union[int, tuple]] = None, keepdi
 
 @lru_cache
 def is_torch_supa_available(check_device: bool = False) -> bool:
-    """Checks if `torch_supa` is installed and potentially if a SUPA device is in the environment.
+    """Checks if `torch_supa` is installed and potentially if a SUPA device is in the environment."""
 
-    Unlike `transformers.is_torch_npu_available`, this does NOT `import torch_supa`, because importing
-    it triggers `transfer_to_supa`, which globally monkey-patches torch (e.g. `torch.cuda` -> `torch.supa`).
-    Such a side effect from a passive availability check could hijack the CUDA stack on a non-SUPA machine
-    that merely has `torch_supa` installed. SUPA entrypoints are expected to import `torch_supa` themselves.
-    """
     if importlib.util.find_spec('torch_supa') is None:
         return False
     if not hasattr(torch, 'supa') or not callable(getattr(torch.supa, 'is_available', None)):
