@@ -7,27 +7,22 @@ from contextlib import contextmanager
 from functools import partial
 from mcore_bridge import set_random_seed
 from megatron.core import mpu
-from megatron.core.rerun_state_machine import RerunDataIterator
-from transformers import AutoConfig
 from transformers.utils import ContextManagers
 from typing import Dict, List, Optional
 
-from swift.infer_engine.protocol import RequestConfig, RolloutInferRequest
 from swift.megatron.arguments import MegatronArguments
-from swift.megatron.model import get_mcore_model
 from swift.rl_core.data import GKDSample
 from swift.rl_core.resample import resample_encode_failed_inputs
-from swift.rlhf_trainers.gkd_helpers import assemble_teacher_output, build_teacher_requests, encode_gkd_samples
+from swift.rlhf_trainers.gkd_helpers import (assemble_teacher_output, build_opsd_samples, build_teacher_requests,
+                                             encode_gkd_samples, fetch_teacher_parsed_by_routing)
 from swift.rlhf_trainers.gkd_loss import DataSource, TeacherOutput, gkd_loss
-from swift.rlhf_trainers.utils import parse_prompt_logprobs
-from swift.rlhf_trainers.vllm_client import VLLMInferClient
 from swift.template import Template
-from swift.utils import get_logger, is_last_rank, to_device
+from swift.utils import get_logger, to_device
 from ..utils import forward_step_helper, get_padding_to
 from .gkd_utils import cp_reduce, tp_gather_topk, vocab_parallel_topk
 from .rlhf_mixin import MegatronRLHFTrainer
 from .rollout_mixin import MegatronRolloutMixin
-from .utils import gather_object, load_megatron_model_to_gpu, offload_megatron_model_to_cpu
+from .utils import gather_object
 from .vocab_parallel_utils import vocab_parallel_kl_div, vocab_parallel_log_softmax
 
 logger = get_logger()
@@ -44,11 +39,8 @@ class MegatronGKDTrainer(MegatronRolloutMixin, MegatronRLHFTrainer):
         self.beta = args.beta  # JSD interpolation coefficient
         self.temperature = args.temperature
         self.lmbda = args.lmbda  # On-policy probability
-        self.offload_teacher_model = args.offload_teacher_model  # Offload teacher to CPU
-        self.teacher_model_server = getattr(args, 'teacher_model_server', None)
-        self.use_teacher_api = self.teacher_model_server is not None
-        self._is_self_distillation = (args.teacher_model is None and self.teacher_model_server is None)
-        self._teacher_use_disable_adapter = getattr(args, '_teacher_use_disable_adapter', False)
+        self.args = args
+        self._setup_teacher()
         if self._teacher_use_disable_adapter:
             logger.info('Self-distillation mode: using disable_adapter() for fixed teacher (no extra model)')
         self.sft_alpha = getattr(args, 'sft_alpha', 0.0)  # Weight for SFT loss
@@ -62,10 +54,6 @@ class MegatronGKDTrainer(MegatronRolloutMixin, MegatronRLHFTrainer):
         super().__init__(args, template)
 
         if self.use_teacher_api:
-            if is_last_rank():
-                self.teacher_client = VLLMInferClient(base_urls=[self.teacher_model_server])
-            else:
-                self.teacher_client = None
             logger.info(f'Using teacher model API for logprobs, top_logprobs={self.gkd_logits_topk}')
 
         # Get device for data processing
@@ -90,61 +78,11 @@ class MegatronGKDTrainer(MegatronRolloutMixin, MegatronRLHFTrainer):
 
     def prepare_model(self):
         super().prepare_model()
-        if self.use_teacher_api or self._is_self_distillation:
-            if self._is_self_distillation:
-                logger.info('Self-distillation mode: using student model as teacher (no separate teacher loaded)')
-            else:
-                logger.info('Skipping local teacher model loading - using external API for teacher logprobs')
-            return
-        args = self.args
-        vp_size = getattr(args, 'virtual_pipeline_model_parallel_size')
-        assert vp_size is None or vp_size == 1, 'GKD currently does not support VPP.'
-        self.teacher_hf_config = AutoConfig.from_pretrained(args.teacher_model_dir, trust_remote_code=True)
-        self.teacher_models = get_mcore_model(args, self.teacher_hf_config)
-        self.teacher_config = self.teacher_models[0].config
-        if not args.use_cpu_initialization:
-            # same as wrap_model in megatron_lm_utils.py
-            for teacher_model in self.teacher_models:
-                teacher_model.cuda(torch.cuda.current_device())
-        for teacher_model in self.teacher_models:
-            teacher_model.requires_grad_(False)
-            teacher_model.eval()
-        self.teacher_config.bridge.load_weights(self.teacher_models, args.teacher_model_dir)
-
-        # Offload teacher models to CPU if enabled
-        if self.offload_teacher_model:
-            self._offload_teacher_models()
-            logger.info('Teacher models offloaded to CPU to save GPU memory')
-
-    def _offload_teacher_models(self):
-        """Offload teacher models to CPU to save GPU memory."""
-        if self.teacher_models and not self.use_teacher_api:
-            offload_megatron_model_to_cpu(self.teacher_models)
-
-    def _load_teacher_models_to_gpu(self):
-        """Load teacher models back to GPU."""
-        if self.teacher_models and not self.use_teacher_api:
-            load_megatron_model_to_gpu(self.teacher_models, load_grad=False)
-
-    @contextmanager
-    def load_teacher_model_context(self):
-        """Context manager to load teacher models for forward pass and optionally offload after.
-
-        When offload_teacher_model is enabled:
-        - Load teacher models to GPU before forward pass
-        - Offload teacher models to CPU after forward pass
-
-        This saves GPU memory during the training step.
-        """
-        if not self.offload_teacher_model:
-            yield
-            return
-
-        self._load_teacher_models_to_gpu()
-        try:
-            yield
-        finally:
-            self._offload_teacher_models()
+        if self.use_teacher_api:
+            logger.info('Skipping local teacher model loading - using external API for teacher logprobs')
+        elif self._is_self_distillation:
+            logger.info('Self-distillation mode: using student model as teacher (no separate teacher loaded)')
+        self._load_teacher_model()
 
     @contextmanager
     def _template_context(self, template: Template, max_length: Optional[int] = None):
@@ -159,7 +97,7 @@ class MegatronGKDTrainer(MegatronRolloutMixin, MegatronRLHFTrainer):
     def _build_teacher_requests(self, samples: List[GKDSample]):
         if not self.use_teacher_api:
             return []
-        return build_teacher_requests(samples)
+        return build_teacher_requests(samples, self.template)
 
     def _encode_samples(self, samples: List[GKDSample]) -> Dict[str, torch.Tensor]:
         template = self.template
@@ -262,39 +200,6 @@ class MegatronGKDTrainer(MegatronRolloutMixin, MegatronRLHFTrainer):
             strip_response=False,
         )
 
-    def _fetch_teacher_parsed_logprobs(self, requests: List[RolloutInferRequest]):
-        """Fetch teacher logprobs from the teacher API server.
-
-        Args:
-            requests: List of RolloutInferRequest (from _build_teacher_requests).
-        """
-        rollout_group = self._get_rollout_group()
-        rollout_rank = torch.distributed.get_rank(group=rollout_group)
-        contribution = list(requests) if rollout_rank == 0 else []
-
-        world_size = torch.distributed.get_world_size()
-        all_contributions = [None] * world_size
-        torch.distributed.all_gather_object(all_contributions, contribution)
-
-        if self.is_main_process:
-            flat_global = []
-            for c in all_contributions:
-                if c:
-                    flat_global.extend(c)
-            request_config = RequestConfig(prompt_logprobs=self.gkd_logits_topk, max_tokens=1, temperature=0.0)
-            responses = self.teacher_client.infer(flat_global, request_config=request_config, use_tqdm=False)
-            parsed_global = [parse_prompt_logprobs(r, topk=self.gkd_logits_topk) for r in responses]
-        else:
-            parsed_global = None
-
-        obj_list = [parsed_global]
-        torch.distributed.broadcast_object_list(obj_list, src=world_size - 1)
-        parsed_global = obj_list[0]
-
-        n = len(requests)
-        dp_rank = mpu.get_data_parallel_rank()
-        return parsed_global[dp_rank * n:(dp_rank + 1) * n]
-
     def _assemble_teacher_outputs(self, encoded_batches: List[Dict]) -> None:
         for encoded_batch in encoded_batches:
             parsed = encoded_batch.pop('_teacher_parsed')
@@ -384,14 +289,24 @@ class MegatronGKDTrainer(MegatronRolloutMixin, MegatronRLHFTrainer):
         # Teacher API: build requests from samples, fetch logprobs
         local_parsed = None
         if self.use_teacher_api:
+            build_opsd_samples(samples)
             teacher_requests = self._build_teacher_requests(samples)
             if teacher_requests:
-                local_parsed = self._fetch_teacher_parsed_logprobs(teacher_requests)
+                local_parsed = fetch_teacher_parsed_by_routing(
+                    samples,
+                    teacher_requests,
+                    self.teacher_configs,
+                    self.teacher_clients,
+                    gather_fn=self._gather_teacher_requests,
+                    infer_fn=lambda handle, client: self._infer_teacher_requests(
+                        handle, topk=self.gkd_logits_topk, teacher_client=client),
+                    scatter_fn=self._scatter_teacher_parsed,
+                    is_main_process=self.is_main_process,
+                    tag_key=self.args.teacher_tag_key)
 
-        # Encode micro-batches
-        total_microbatches = self.args.num_microbatches * self.steps_per_generation
-        micro_batch_size = len(samples) // total_microbatches
-        assert micro_batch_size == self.args.micro_batch_size
+        micro_batch_size = self.args.micro_batch_size
+        total_microbatches = len(samples) // micro_batch_size
+        assert total_microbatches * micro_batch_size == len(samples)
         all_encoded_batches = []
         for i in range(total_microbatches):
             start_idx = i * micro_batch_size
@@ -405,37 +320,26 @@ class MegatronGKDTrainer(MegatronRolloutMixin, MegatronRLHFTrainer):
         self._compute_teacher_logits(all_encoded_batches)
         return all_encoded_batches
 
-    def _replace_data_iterator(self, data_iterator):
+    def _build_rollout_buffer(self, data_iterator):
         num_microbatches = self.args.num_microbatches
-        steps_per_generation = self.steps_per_generation
+        num_gen_steps = self.steps_per_generation if self.unwrapped_models[0].training else 1
+        total_microbatches = num_microbatches * num_gen_steps
+        global_batch = []
+        for _ in range(total_microbatches):
+            raw_batch = next(data_iterator)
+            if self.truncation_strategy == 'delete' and self.resample_data_iterator is not None:
+                raw_batch = self.resample_encode_failed_inputs(raw_batch)
+            global_batch.extend(raw_batch)
 
-        if self._step % steps_per_generation == 0:
-            total_microbatches = num_microbatches * steps_per_generation
-            global_batch = []
-            for _ in range(total_microbatches):
-                raw_batch = next(data_iterator)
-                if self.truncation_strategy == 'delete' and self.resample_data_iterator is not None:
-                    raw_batch = self.resample_encode_failed_inputs(raw_batch)
-                global_batch.extend(raw_batch)
+        all_encoded_batches = self._generate_and_score_completions(global_batch)
+        return [all_encoded_batches[i * num_microbatches:(i + 1) * num_microbatches] for i in range(num_gen_steps)]
 
-            all_encoded_batches = self._generate_and_score_completions(global_batch)
-            self._buffered_inputs = [
-                all_encoded_batches[i * num_microbatches:(i + 1) * num_microbatches]
-                for i in range(steps_per_generation)
-            ]
-
-        step_idx = self._step % steps_per_generation
-        encoded_batches = self._buffered_inputs[step_idx]
-
+    def _on_train_step_batch(self, encoded_batches):
         # Self-distillation teacher == current student weights. Recompute per train step (weights are
         # constant within a step) instead of once per generation cycle, so it tracks student updates
         # across steps_per_generation. Runs outside the pipeline schedule, so PP > 1 is supported.
         if self._is_self_distillation:
             self._compute_teacher_logits_local(encoded_batches)
-
-        self._step += 1
-
-        return RerunDataIterator(iter(encoded_batches))
 
     def loss_func(self,
                   output_tensor: torch.Tensor,

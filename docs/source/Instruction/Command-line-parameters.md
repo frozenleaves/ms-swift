@@ -511,6 +511,7 @@ Vera使用`target_modules`、`target_regex`、`modules_to_save`三个参数，�
   - 注意：Qwen3-Next的packing请使用Megatron-SWIFT。Qwen3.5的transformers生态padding_free/packing支持请使用"ms-swift>=4.3.1"（或使用Megatron-SWIFT），具体参考[Qwen3.5最佳实践](../BestPractices/Qwen3_5-Best-Practice.md)。
 - packing_length: packing的长度。默认为None，设置为max_length。
 - packing_num_proc: packing的进程数，默认为1。需要注意的是，不同的`packing_num_proc`，最终形成的packed数据集是不同的。（该参数在流式packing时不生效）。通常不需要修改该值，packing速度远快于tokenize速度。
+- packing_strategy: packing 算法，可选为'binpack'和'sequential'，默认为'binpack'。'binpack'使用 best-fit-decreasing 装箱（会按长度重排样本）；'sequential'使用保序的贪心装箱（next-fit：仅维护一个开放 pack，放不下即 flush），按输入顺序逐条装箱，使样本顺序与每个 pack 的边界跟随顺序采样器（建议配合 packing_num_proc=1 以保证全局顺序）。
 - lazy_tokenize: 是否使用lazy_tokenize。若该参数设置为False，则在训练之前对所有的数据集样本进行tokenize（多模态模型则包括从磁盘中读取图片）。该参数默认为None，在LLM训练中默认为False，而MLLM训练默认为True，节约内存。
   - 注意：若你要进行图像的数据增强，你需要将lazy_tokenize（或streaming）设置为True，并修改Template类中的encode方法。
 - use_logits_to_keep: 通过在`forward`中根据labels传入logits_to_keep，减少无效logits的计算与存储，从而减少显存占用并加快训练速度。默认为None，进行自动选择。
@@ -571,30 +572,33 @@ RLHF参数继承于[训练参数](#训练参数)。
 - temperature: 默认为0.9，该参数将在PPO、GRPO、GKD中使用。
 - top_k: rollout采样的top-k参数，-1表示不进行top-k过滤。默认为-1。
 - top_p: rollout采样的top-p参数，1.0表示不进行top-p过滤。默认为1.0。
+- min_p: rollout采样的min-p参数，概率低于最高概率token概率`min_p`倍的token将被过滤，0.0表示不进行min-p过滤。默认为0.0。仅对vLLM后端生效。
 
 #### GKD参数
 - lmbda: 默认为0.5。该参数在GKD中使用。控制学生数据比例的 lambda 参数（即策略内学生生成输出所占的比例）。若lmbda为0，则不使用学生生成数据。
 - sft_alpha: 默认为0。控制GKD中加入sft_loss的权重。最后的loss为`gkd_loss + sft_alpha * sft_loss`。
-- gkd_logits_topk: 使用 Top-K logits 计算 KL 散度，默认为 None（即使用完整词表计算）。设置该参数可有效降低训练显存峰值；当配置 teacher_model_server 时，此参数为必填项。详见[GKD 文档](./GKD.md#top-k-kl-计算)。
-- offload_teacher_model: 卸载教师模型以节约显存，只在采样/计算logps时加载，默认为False。
+- gkd_logits_topk: 使用 Top-K logits 计算 KL 散度，默认为 None（即使用完整词表计算）。设置该参数可有效降低训练显存峰值；当配置 `teacher_model_server` 时，此参数为必填项。详见[蒸馏文档](./Distillation.md#31-gkd散度作为直接损失)。
 - truncation_strategy: 用于处理输入长度超过 max_length 的样本，支持 delete 和 left 两种策略，分别表示删除该样本和从左侧裁剪。默认值为 left。若使用 delete 策略，被删除的超长样本或编码失败的样本将在原数据集中通过重采样进行替换。
 - log_completions: 是否记录训练中的模型生成内容，搭配 `--report_to wandb/swanlab` 使用。默认为False。
   - 提示：若没有设置`--report_to wandb/swanlab`，则会在checkpoint中创建`completions.jsonl`来存储生成内容。
   - 仅记录 vLLM 采样结果。
 
 #### Reward/Teacher模型参数
-reward模型参数将在PPO、GRPO中使用。
+reward模型参数将在PPO、GRPO中使用；teacher模型参数在GKD与GRPO中使用。
 
 - reward_model: 默认为None。
 - reward_adapters: 默认为`[]`。
 - reward_model_type: 默认为None。
 - reward_model_revision: 默认为None。
-- teacher_model: 默认为None。rlhf_type为'gkd'时需传入此参数。
+- teacher_model: 默认为None。
 - teacher_adapters: 默认为`[]`。
 - teacher_model_type: 默认为None。
 - teacher_model_revision: 默认为None。
-- teacher_model_server: 教师模型服务地址, 如：`http://localhost:8000`, 使用`vllm serve`部署的服务端计算top-k-logps。
+- teacher_model_server: 教师模型服务地址，通过 `swift deploy` 部署后用于获取 logprobs。支持单 teacher URL（如 `http://localhost:8000`）或多 teacher JSON（如 `'[{"url":"http://t1:8000","tags":["data/math.jsonl"]},{"url":"http://t2:8001","tags":["data/code.jsonl"]}]'`）。`tags` 与数据集或样本标识的对应关系见[蒸馏文档](./Distillation.md#multi-teacher多教师路由)。
+- teacher_tag_key: 多 teacher 路由时，样本用于匹配 teacher `tags` 的字段名，默认为 `"dataset"`。多数据集时按 `--dataset` 各项匹配；也可在数据中自定义列（如 `teacher_tag`）并设为 `--teacher_tag_key teacher_tag`。
 - teacher_deepspeed: 同 deepspeed 参数，控制 teacher model 的 deepspeed 配置，默认使用训练模型的 deepspeed 配置。
+- offload_teacher_model: 卸载教师模型以节约显存，在采样/计算logps时加载，仅在设置teacher_model时生效默认为False。
+
 
 #### PPO参数
 
@@ -675,6 +679,15 @@ reward模型参数将在PPO、GRPO中使用。
 - scale_rewards: 指定奖励的缩放策略。可选值包括 `group`（按组内标准差缩放）、`batch`（按整个批次的标准差缩放）、`none`（不进行缩放）、`gdpo`（对每个奖励函数分别进行组内归一化后加权聚合，参考 [GDPO 论文](https://arxiv.org/abs/2601.05242)）。默认值与 `advantage_estimator` 绑定：`grpo` 对应 `group`，`rloo` 对应 `none`，`reinforce_plus_plus` 对应 `batch`。
   - 注意：`gdpo` 模式不支持 `kl_in_reward=True`，若同时设置会自动将 `kl_in_reward` 设为 `False`。
   - GDPO 适用于多奖励优化场景：当使用多个奖励函数时，GDPO 会对每个奖励函数分别在组内进行标准化（减均值、除标准差），然后使用 `reward_weights` 进行加权求和，最后再进行批次级别的标准化。这种方式可以更好地保留各个奖励的相对差异，避免不同奖励组合坍塌成相同的 advantage 值。
+- teacher_kl_coef: OPD-RL中teacher_kl的系数，即 `adv_t = base_adv + teacher_kl_coef * teacher_kl`。默认为 1.0。
+- advantage_reweight: 优势重加权算法，默认为None（不启用）。可选项为 `rlsd`（[RLSD, Self-Distilled RLVR](https://arxiv.org/abs/2604.03128)）：利用 teacher 与 student 在相同采样 token 上的对数概率差异，将 GRPO 的序列级优势在 token 维度重新分配，即 `delta_t = logP_T(y_t) - logP_S(y_t)`、`w_t = exp(sign(A) * delta_t)`、`reweight = (1 - λ) + λ * clip(w_t)`、`A_hat_t = A * reweight`；reweight 恒为正，不会翻转环境奖励的符号。启用后需满足：已设置 `reward_funcs`（reweight 方向依赖优势符号 `sign(A)`），且数据集包含 `teacher_prompt` 列（特权 prompt，如 问题 + 参考解答/标准答案）；与 `use_liger_kernel`、`loss_type in [real, fipo]`、`off_policy_sequence_mask_delta`、`teacher_model_server` 不兼容。teacher 模式：不设置 `--teacher_model` 时为动态自蒸馏（teacher = 当前策略在特权 prompt 上打分）；设置 `--teacher_model <ckpt>` 时为冻结本地 teacher（在 no_grad 下打分，训练中不更新）。
+- rlsd_lambda: RLSD 混合权重，`reweight = (1 - λ) + λ * clip(w_t)`。`0` 退化为普通 GRPO，`1` 为完整 RLSD 重加权。取值需在 [0, 1]，默认为 0.5。
+- rlsd_reweight_clip_range: 证据权重裁剪范围 eps_w，将 `w_t = exp(sign(A) * delta_t)` 裁剪到 `[1 - eps_w, 1 + eps_w]`，避免 teacher/student 对数概率差异造成过大的倍率。需 >= 0，默认为 0.2。
+- rlsd_lambda_warmup_steps: 将 λ 从 0 线性 warmup 到 `rlsd_lambda` 的步数。默认为 0（不进行 warmup）。
+- rlsd_lambda_decay_steps: 在 warmup 之后，将 λ 从 `rlsd_lambda` 线性衰减到 0 的步数。默认为 0（不衰减，λ 保持恒定）。
+- rlsd_negative_only: 是否仅对优势为负（`A < 0`，即错误回答）的序列进行重加权；优势非负的序列保留普通 GRPO 优势。默认为 False。
+- sdar_loss_coef: SDAR（[Self-Distilled Agentic RL](https://arxiv.org/abs/2605.15155)）置信度门控 teacher 蒸馏辅助损失的系数，叠加到 GRPO 策略损失上：`loss = policy_loss + sdar_loss_coef * L_SDAR`，其中 `L_SDAR = token-mean(sigmoid(sdar_gate_beta * delta_t) * delta_t)`、`delta_t = logP_T(y_t) - logP_S(y_t)`。门控与 teacher 对数概率均 detach，梯度只经由 student 回传。复用 OPSD 自蒸馏 teacher（teacher = 当前策略在特权 `teacher_prompt` 列上打分）得到逐 token 的 teacher 对数概率；与 RLSD 不同，它不修改 GRPO 优势。`> 0` 时启用；与 `use_liger_kernel`、`advantage_reweight=rlsd`、`teacher_model_server` 不兼容。默认为 0.0（不启用）；参考实现使用 0.1（ALFWorld 为 0.01）。
+- sdar_gate_beta: SDAR sigmoid 门控 `sigmoid(sdar_gate_beta * delta_t)` 的温度系数，值越大门控越尖锐。需 > 0，默认为 5.0。
 - sync_ref_model: 是否定期同步ref_model，默认为False。
   - ref_model_mixup_alpha: 控制在更新过程中model和先前ref_model之间的混合。更新公式为 $π_{ref} = α * π_θ + (1 - α) * π_{ref_{prev}}$。默认为0.6。
   - ref_model_sync_steps: 同步频率，默认为512。
@@ -957,3 +970,4 @@ qwen2_5_omni除了包含qwen2_5_vl和qwen2_audio的模型特定参数外，还�
 - SWIFT_TIMEOUT: 若多模态数据集中存在图像URL，该参数用于控制获取图片的timeout，默认为20s。
 - ROOT_IMAGE_DIR: 图像（多模态）资源的根目录。通过设置该参数，可以在数据集中使用相对于 `ROOT_IMAGE_DIR` 的相对路径。默认情况下，是相对于运行目录的相对路径。
 - SWIFT_SINGLE_DEVICE_MODE: 单设备模式，可选值为"0"(默认值)/"1"，在此模式下，每个进程只能看到一个设备。
+- SWIFT_AUDIO_LOAD_BACKEND: 音频波形加载后端。`librosa`（默认）或 `soundfile_pyav`（soundfile 优先、失败时 pyav fallback）。GRPO/GKD训练 在 `--use_vllm true`时默认为 `soundfile_pyav`，保证训练侧 encode 与 vLLM rollout 解析同一音频 URL 时波形一致。

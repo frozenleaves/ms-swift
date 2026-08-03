@@ -4,9 +4,11 @@ import inspect
 import os
 import torch
 import torch.nn.functional as F
+from importlib import import_module
 from packaging import version
 from PIL import Image
-from transformers import AutoTokenizer, BitsAndBytesConfig, PretrainedConfig, PreTrainedModel, PreTrainedTokenizerBase
+from transformers import (AutoConfig, AutoModel, AutoTokenizer, BitsAndBytesConfig, PretrainedConfig, PreTrainedModel,
+                          PreTrainedTokenizerBase)
 from transformers.dynamic_module_utils import get_class_from_dynamic_module
 from transformers.models.auto.tokenization_auto import get_tokenizer_config
 from transformers.utils.versions import require_version
@@ -16,7 +18,7 @@ from typing import Optional, Tuple, Type, Union
 from swift.sequence_parallel import sequence_parallel
 from swift.template import TemplateType
 from swift.utils import (Processor, get_cu_seqlens_from_position_ids, get_device_count, get_dist_setting, get_env_args,
-                         get_logger, is_deepspeed_enabled, to_device)
+                         get_logger, is_deepspeed_enabled, safe_snapshot_download, to_device)
 from ..constant import LLMModelType, MLLMModelType, RMModelType
 from ..model_arch import ModelArch
 from ..model_meta import Model, ModelGroup, ModelMeta
@@ -29,12 +31,29 @@ dtype_mapping = {torch.float16: 'fp16', torch.bfloat16: 'bf16', torch.float32: '
 
 causal_conv1d = None
 chunk_gated_delta_rule = None
+
+
+def _try_import_flash_linear_attention_kernels() -> None:
+    global causal_conv1d, chunk_gated_delta_rule
+    if causal_conv1d is None:
+        try:
+            from fla.modules.convolution import causal_conv1d as _causal_conv1d
+            causal_conv1d = _causal_conv1d
+        except Exception:
+            pass
+    if chunk_gated_delta_rule is None:
+        try:
+            from fla.ops.gated_delta_rule import chunk_gated_delta_rule as _chunk_gated_delta_rule
+            chunk_gated_delta_rule = _chunk_gated_delta_rule
+        except Exception:
+            pass
+
+
 try:
     from transformers.utils.import_utils import is_flash_linear_attention_available
 
     if is_flash_linear_attention_available():
-        from fla.modules.convolution import causal_conv1d
-        from fla.ops.gated_delta_rule import chunk_gated_delta_rule
+        _try_import_flash_linear_attention_kernels()
 except Exception:
     pass
 
@@ -1165,9 +1184,10 @@ def _get_local_padding_mask(attention_mask: torch.Tensor, local_seq_len: int):
 
 
 def _ensure_linear_attention_kernels(mod: torch.nn.Module) -> None:
-    mod.causal_conv1d_fn = causal_conv1d
+    _try_import_flash_linear_attention_kernels()
+    mod._swift_fla_causal_conv1d_fn = causal_conv1d
     mod.chunk_gated_delta_rule = getattr(mod, 'chunk_gated_delta_rule', None) or chunk_gated_delta_rule
-    if mod.chunk_gated_delta_rule is None or mod.causal_conv1d_fn is None:
+    if mod.chunk_gated_delta_rule is None or mod._swift_fla_causal_conv1d_fn is None:
         raise ImportError('Qwen3.5 linear attention padding free/sequence parallel requires flash-linear-attention. '
                           'Install: https://github.com/fla-org/flash-linear-attention#installation')
 
@@ -1218,7 +1238,7 @@ def _run_qwen3_5_gated_delta_net_sequence_parallel_forward(
     **kwargs,
 ) -> torch.Tensor:
     _ensure_linear_attention_kernels(mod)
-    from transformers.models.qwen3_5.modeling_qwen3_5 import apply_mask_to_padding_states
+    apply_mask_to_padding_states = mod.__class__._apply_mask_to_padding_states
 
     local_attention_mask = attention_mask
     if torch.is_tensor(attention_mask) and attention_mask.dim() == 2:
@@ -1283,7 +1303,7 @@ def _run_qwen3_5_gated_delta_net_sequence_parallel_forward(
     if cache_params is not None:
         cache_params.conv_states[mod.layer_idx] = F.pad(
             mixed_qkv.transpose(1, 2).contiguous(), (mod.conv_kernel_size - mixed_qkv.shape[1], 0))
-    mixed_qkv, _ = mod.causal_conv1d_fn(
+    mixed_qkv, _ = mod._swift_fla_causal_conv1d_fn(
         x=mixed_qkv,
         weight=conv_weight,
         bias=conv_bias,
@@ -1333,54 +1353,68 @@ def _run_qwen3_5_gated_delta_net_sequence_parallel_forward(
 
 
 def _patch_qwen3_5_linear_attention_sequence_parallel() -> None:
-    try:
-        from transformers.models.qwen3_5.modeling_qwen3_5 import Qwen3_5GatedDeltaNet
-    except Exception:
-        return
+    gated_delta_net_specs = []
+    class_specs = (
+        ('transformers.models.qwen3_5.modeling_qwen3_5', 'Qwen3_5GatedDeltaNet'),
+        ('transformers.models.qwen3_5_moe.modeling_qwen3_5_moe', 'Qwen3_5MoeGatedDeltaNet'),
+    )
+    for module_name, class_name in class_specs:
+        try:
+            modeling_module = import_module(module_name)
+            gated_delta_net_cls = getattr(modeling_module, class_name)
+            apply_mask_to_padding_states = getattr(modeling_module, 'apply_mask_to_padding_states')
+            gated_delta_net_specs.append((gated_delta_net_cls, apply_mask_to_padding_states))
+        except Exception:
+            pass
 
-    if getattr(Qwen3_5GatedDeltaNet, '_ms_swift_sp_linear_patched', False):
-        return
+    def patch_gated_delta_net(gated_delta_net_cls, apply_mask_to_padding_states):
+        if getattr(gated_delta_net_cls, '_ms_swift_sp_linear_patched', False):
+            return
 
-    origin_forward = Qwen3_5GatedDeltaNet.forward
-    parameters = inspect.signature(origin_forward).parameters
+        gated_delta_net_cls._apply_mask_to_padding_states = apply_mask_to_padding_states
+        origin_forward = gated_delta_net_cls.forward
+        parameters = inspect.signature(origin_forward).parameters
 
-    def sp_linear_forward(
-        mod,
-        hidden_states: torch.Tensor,
-        cache_params=None,
-        cache_position=None,
-        attention_mask: Optional[torch.Tensor] = None,
-        **kwargs,
-    ):
-        if not sequence_parallel.enabled() and 'cu_seq_lens_q' not in kwargs:
-            kwargs = {}
-            if 'cache_position' in parameters:
-                kwargs['cache_position'] = cache_position
-            return origin_forward(
-                mod, hidden_states, cache_params=cache_params, attention_mask=attention_mask, **kwargs)
-
-        if int(sequence_parallel.rp_world_size or 1) > 1:
-            requested_sp_size = int(sequence_parallel.world_size or 1)
-            suggested_sp_size = int(sequence_parallel.sp_world_size or 1)
-            raise NotImplementedError(
-                'Qwen3.5 linear attention sequence parallel does not support derived ring attention '
-                f'(sequence_parallel_size={requested_sp_size}, '
-                f'sp_world_size={sequence_parallel.sp_world_size}, '
-                f'rp_world_size={sequence_parallel.rp_world_size}). '
-                f'Please reduce --sequence_parallel_size to {suggested_sp_size} so that rp_world_size becomes 1.')
-
-        # padding_free/packing or sp will all go through here
-        return _run_qwen3_5_gated_delta_net_sequence_parallel_forward(
+        def sp_linear_forward(
             mod,
-            hidden_states,
-            cache_params=cache_params,
-            cache_position=cache_position,
-            attention_mask=attention_mask,
+            hidden_states: torch.Tensor,
+            cache_params=None,
+            cache_position=None,
+            attention_mask: Optional[torch.Tensor] = None,
             **kwargs,
-        )
+        ):
+            if not sequence_parallel.enabled() and 'cu_seq_lens_q' not in kwargs:
+                kwargs = {}
+                if 'cache_position' in parameters:
+                    kwargs['cache_position'] = cache_position
+                return origin_forward(
+                    mod, hidden_states, cache_params=cache_params, attention_mask=attention_mask, **kwargs)
 
-    Qwen3_5GatedDeltaNet.forward = sp_linear_forward
-    Qwen3_5GatedDeltaNet._ms_swift_sp_linear_patched = True
+            if int(sequence_parallel.rp_world_size or 1) > 1:
+                requested_sp_size = int(sequence_parallel.world_size or 1)
+                suggested_sp_size = int(sequence_parallel.sp_world_size or 1)
+                raise NotImplementedError(
+                    'Qwen3.5 linear attention sequence parallel does not support derived ring attention '
+                    f'(sequence_parallel_size={requested_sp_size}, '
+                    f'sp_world_size={sequence_parallel.sp_world_size}, '
+                    f'rp_world_size={sequence_parallel.rp_world_size}). '
+                    f'Please reduce --sequence_parallel_size to {suggested_sp_size} so that rp_world_size becomes 1.')
+
+            # padding_free/packing or sp will all go through here
+            return _run_qwen3_5_gated_delta_net_sequence_parallel_forward(
+                mod,
+                hidden_states,
+                cache_params=cache_params,
+                cache_position=cache_position,
+                attention_mask=attention_mask,
+                **kwargs,
+            )
+
+        gated_delta_net_cls.forward = sp_linear_forward
+        gated_delta_net_cls._ms_swift_sp_linear_patched = True
+
+    for gated_delta_net_cls, apply_mask_to_padding_states in gated_delta_net_specs:
+        patch_gated_delta_net(gated_delta_net_cls, apply_mask_to_padding_states)
 
 
 class Qwen3_5MoeLoader(Qwen3VLLoader):
@@ -1459,6 +1493,20 @@ register_model(
         architectures=['Qwen3_5ForConditionalGeneration'],
         requires=['transformers>=5.0.0.dev', 'qwen_vl_utils>=0.0.14', 'decord'],
         tags=['vision', 'video']))
+
+register_model(
+    ModelMeta(
+        MLLMModelType.ovis_ocr2, [
+            ModelGroup([
+                Model('ATH-MaaS/OvisOCR2', 'ATH-MaaS/OvisOCR2'),
+            ]),
+        ],
+        Qwen3_5Loader,
+        template=TemplateType.ovis_ocr2,
+        model_arch=ModelArch.qwen2_vl,
+        architectures=['Qwen3_5ForConditionalGeneration'],
+        requires=['transformers>=5.0.0.dev', 'qwen_vl_utils>=0.0.14', 'decord'],
+        tags=['vision']))
 
 
 class Qwen2_5OmniLoader(ModelLoader):
@@ -1655,7 +1703,7 @@ def _compat_qwen3_omni_mixed_data(model, processor):
                 attention_mask,
             )
             if labels is not None:
-                loss += self.config.router_aux_loss_coef * aux_loss.to(
+                loss += self.config.text_config.router_aux_loss_coef * aux_loss.to(
                     loss.device)  # make sure to reside in the same device
 
         return Qwen3OmniMoeThinkerCausalLMOutputWithPast(
@@ -1690,6 +1738,7 @@ class Qwen3OmniLoader(ModelLoader):
     def get_model(self, model_dir: str, config, processor, model_kwargs) -> PreTrainedModel:
         from transformers import Qwen3OmniMoeForConditionalGeneration
         self.auto_model_cls = self.auto_model_cls or Qwen3OmniMoeForConditionalGeneration
+        Qwen3OmniMoeForConditionalGeneration._no_split_modules.append('Qwen3OmniMoeThinkerTextDecoderLayer')
         model = super().get_model(model_dir, config, processor, model_kwargs)
         _compat_qwen3_omni_mixed_data(model.thinker, processor)
         base_model = model.model if 'AWQ' in model.__class__.__name__ else model
@@ -1735,7 +1784,6 @@ class Qwen3ASRLoader(ModelLoader):
         return super().get_config(model_dir)
 
     def get_model(self, model_dir: str, config, processor, model_kwargs) -> PreTrainedModel:
-        from transformers import AutoModel
         self.auto_model_cls = self.auto_model_cls or AutoModel
         model = super().get_model(model_dir, config, processor, model_kwargs)
         use_submodel_func(model, 'thinker')
@@ -1756,6 +1804,114 @@ register_model(
         architectures=['Qwen3ASRForConditionalGeneration'],
         requires=['qwen-asr', 'transformers==4.57.6'],
         tags=['audio'],
+    ))
+
+
+def _patch_qwen3_tts_forward(model):
+    """Patch model.forward to implement Qwen3-TTS dual-channel training logic."""
+
+    def tts_forward(self,
+                    input_ids=None,
+                    attention_mask=None,
+                    speaker_embedding=None,
+                    text_embedding_mask=None,
+                    codec_embedding_mask=None,
+                    codec_0_labels=None,
+                    codec_ids=None,
+                    codec_mask=None,
+                    **kwargs):
+
+        # Separate dual-channel input_ids
+        input_text_ids = input_ids[:, :, 0]
+        input_codec_ids = input_ids[:, :, 1]
+
+        # Build text and codec embeddings
+        input_text_embedding = self.talker.text_projection(
+            self.talker.model.text_embedding(input_text_ids)) * text_embedding_mask
+        input_codec_embedding = self.talker.model.codec_embedding(input_codec_ids) * codec_embedding_mask
+        # Inject speaker embedding at position 6
+        input_codec_embedding[:, 6, :] = speaker_embedding
+
+        # Sum text and codec embeddings
+        input_embeddings = input_text_embedding + input_codec_embedding
+
+        # Add sub-talker codec embeddings (layers 1-15)
+        for i in range(1, 16):
+            codec_i_embedding = self.talker.code_predictor.get_input_embeddings()[i - 1](codec_ids[:, :, i])
+            codec_i_embedding = codec_i_embedding * codec_mask.unsqueeze(-1)
+            input_embeddings = input_embeddings + codec_i_embedding
+
+        outputs = self.talker(
+            inputs_embeds=input_embeddings,
+            attention_mask=attention_mask,
+            labels=codec_0_labels,
+            output_hidden_states=True,
+        )
+
+        # Compute sub_talker_loss from hidden states at codec positions
+        hidden_states = outputs.hidden_states[0][-1][:, :-1, :]
+        talker_hidden_states = hidden_states[codec_mask[:, 1:]]
+        talker_codec_ids = codec_ids[codec_mask]
+
+        sub_talker_logits, _ = self.talker.forward_sub_talker_finetune(talker_codec_ids, talker_hidden_states)
+        sub_talker_loss = F.cross_entropy(
+            sub_talker_logits.reshape(-1, sub_talker_logits.shape[-1]).float(),
+            talker_codec_ids[:, 1:].reshape(-1).to(sub_talker_logits.device),
+        )
+
+        outputs['loss'] = outputs.loss + 0.3 * sub_talker_loss
+
+        return outputs
+
+    model.forward = MethodType(tts_forward, model)
+
+
+class Qwen3TTSLoader(ModelLoader):
+
+    def get_config(self, model_dir: str):
+        from qwen_tts.core.models import Qwen3TTSConfig, Qwen3TTSForConditionalGeneration, Qwen3TTSProcessor
+        from transformers import AutoProcessor
+        AutoConfig.register('qwen3_tts', Qwen3TTSConfig)
+        AutoModel.register(Qwen3TTSConfig, Qwen3TTSForConditionalGeneration)
+        AutoProcessor.register(Qwen3TTSConfig, Qwen3TTSProcessor)
+
+        return super().get_config(model_dir)
+
+    def get_model(self, model_dir: str, config, processor, model_kwargs) -> PreTrainedModel:
+        self.auto_model_cls = self.auto_model_cls or AutoModel
+        model = super().get_model(model_dir, config, processor, model_kwargs)
+        # Redirect gradient_checkpointing and get_input_embeddings to talker
+        use_submodel_func(model, 'talker', func_list=['get_input_embeddings', 'gradient_checkpointing_enable'])
+        if model.speaker_encoder is not None:
+            # Freeze speaker_encoder (only talker is trained)
+            for param in model.speaker_encoder.parameters():
+                param.requires_grad = False
+        # Patch forward for TTS dual-channel training
+        _patch_qwen3_tts_forward(model)
+        from qwen_tts import Qwen3TTSTokenizer
+        tokenizer_path = get_env_args('tts_tokenizer_path', str, 'Qwen/Qwen3-TTS-Tokenizer-12Hz')
+        tokenizer_path = safe_snapshot_download(tokenizer_path)
+        processor.tts_tokenizer = Qwen3TTSTokenizer.from_pretrained(tokenizer_path, device_map='cpu')
+        model.config = config
+        return model
+
+
+register_model(
+    ModelMeta(
+        MLLMModelType.qwen3_tts,
+        [
+            ModelGroup([
+                Model('Qwen/Qwen3-TTS-12Hz-1.7B-Base', 'Qwen/Qwen3-TTS-12Hz-1.7B-Base'),
+                Model('Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice', 'Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice'),
+                Model('Qwen/Qwen3-TTS-12Hz-0.6B-Base', 'Qwen/Qwen3-TTS-12Hz-0.6B-Base'),
+                Model('Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice', 'Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice'),
+            ], TemplateType.qwen3_tts)
+        ],
+        Qwen3TTSLoader,
+        model_arch=ModelArch.qwen3_tts,
+        architectures=['Qwen3TTSForConditionalGeneration'],
+        requires=['qwen-tts', 'transformers<5'],
+        tags=['audio', 'tts'],
     ))
 
 

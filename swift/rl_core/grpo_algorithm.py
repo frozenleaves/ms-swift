@@ -20,6 +20,7 @@ def compute_rewards_per_func(
     reward_model_plugins: List[Optional[Any]],
     device: torch.device,
     trainer_state: Optional[Any] = None,
+    extra_reward_kwargs: Optional[Dict[str, Any]] = None,
 ) -> torch.Tensor:
     """Compute per-function rewards for ``samples``.
 
@@ -45,6 +46,8 @@ def compute_rewards_per_func(
     completions = [s.messages[-1]['content'] for s in samples]
 
     reward_kwargs: Dict[str, Any] = {'trainer_state': trainer_state}
+    if extra_reward_kwargs:
+        reward_kwargs.update(extra_reward_kwargs)
     reward_rows = [s.to_reward_row() for s in samples]
     if reward_rows:
         from swift.dataset import RowPreprocessor
@@ -74,7 +77,7 @@ def compute_rewards_per_func(
             output = [r if r is not None else torch.nan for r in output]
             rewards_per_func[:, idx] = torch.tensor(output, dtype=torch.float32, device=device)
 
-    if torch.isnan(rewards_per_func).all(dim=1).any():
+    if rewards_per_func.shape[1] > 0 and torch.isnan(rewards_per_func).all(dim=1).any():
         nan_row_idx = torch.isnan(rewards_per_func).all(dim=1).nonzero(as_tuple=True)[0][0]
         row_reward_kwargs = {key: value[nan_row_idx] for key, value in reward_kwargs.items() if key != 'trainer_state'}
         row_reward_kwargs['completion'] = completions[nan_row_idx]
@@ -91,6 +94,7 @@ def score_completions(
     use_gym_env: bool,
     device: torch.device,
     trainer_state: Optional[Any] = None,
+    extra_reward_kwargs: Optional[Dict[str, Any]] = None,
 ) -> torch.Tensor:
     """Score completions and return per-function rewards.
 
@@ -109,6 +113,7 @@ def score_completions(
             reward_model_plugins,
             device=device,
             trainer_state=trainer_state,
+            extra_reward_kwargs=extra_reward_kwargs,
         )
         return torch.cat([func_rewards, gym_reward], dim=1)
 
@@ -118,6 +123,7 @@ def score_completions(
         reward_model_plugins,
         device=device,
         trainer_state=trainer_state,
+        extra_reward_kwargs=extra_reward_kwargs,
     )
 
 

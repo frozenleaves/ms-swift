@@ -13,6 +13,7 @@ from functools import partial
 from mcore_bridge import LoraParallelLinear
 from megatron.core import mpu
 from megatron.core.distributed import DistributedDataParallel as DDP
+from megatron.core.distributed import FullyShardedDataParallel as megatron_FSDP
 from megatron.core.distributed import finalize_model_grads
 from megatron.core.optimizer import OptimizerConfig, get_megatron_optimizer
 from megatron.core.pipeline_parallel import get_forward_backward_func
@@ -594,7 +595,7 @@ class BaseMegatronTrainer(ABC):
                 self._prepare_vit_gradient_checkpointing(m)
 
         config.grad_scale_func = self.optimizer.scale_loss
-        if isinstance(self.wrapped_models[0], DDP) and args.overlap_grad_reduce:
+        if isinstance(self.wrapped_models[0], (DDP, megatron_FSDP)) and args.overlap_grad_reduce:
             assert config.no_sync_func is None, ('When overlap_grad_reduce is True, config.no_sync_func must be None; '
                                                  'a custom no_sync_func is not supported when overlapping grad-reduce')
             config.no_sync_func = [model_chunk.no_sync for model_chunk in self.wrapped_models]
@@ -616,6 +617,37 @@ class BaseMegatronTrainer(ABC):
             disable_forward_pre_hook(self.wrapped_models, param_sync=False)
             self._saved_param_sync_func = config.param_sync_func
             config.param_sync_func = None
+
+        if args.nccl_comm_warmup:
+            # Eagerly create NCCL communicators while GPU memory is still free. Lazily-initialized
+            # comms (e.g. the dp/cp loss all-reduce and grad-sync coalescing) otherwise first fire
+            # at the iteration-1 memory peak, where NCCL's internal cudaMalloc can fail with
+            # "Failed to CUDA calloc async N bytes". A 1-element dummy all-reduce per group is
+            # numerically inert and forces the communicator to be created up front.
+            dummy = torch.zeros(1, device=get_current_device())
+            warmed = 0
+            for getter, kwargs in (
+                (mpu.get_data_parallel_group, {
+                    'with_context_parallel': True
+                }),
+                (mpu.get_data_parallel_group, {}),
+                (mpu.get_context_parallel_group, {}),
+                (mpu.get_tensor_model_parallel_group, {}),
+                (mpu.get_pipeline_model_parallel_group, {}),
+                (mpu.get_model_parallel_group, {}),
+                (mpu.get_embedding_group, {}),
+                (mpu.get_position_embedding_group, {}),
+            ):
+                try:
+                    group = getter(**kwargs)
+                except (AssertionError, ValueError, TypeError):
+                    continue
+                for g in (group if isinstance(group, list) else [group]):
+                    if g is not None:
+                        torch.distributed.all_reduce(dummy, group=g)
+                        warmed += 1
+            torch.cuda.synchronize()
+            logger.info(f'NCCL communicator warm-up done ({warmed} groups).')
 
         self.call_event('on_train_begin')
         self._train_metrics = {}

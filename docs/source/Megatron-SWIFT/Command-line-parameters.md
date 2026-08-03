@@ -38,6 +38,7 @@
 - 🔥optimizer_cpu_offload: 将优化器状态卸载到 CPU，例如设置：`--use_precision_aware_optimizer true --optimizer_cpu_offload true --optimizer_offload_fraction 0.7`。默认为False。
   - 该参数可以显著降低显存占用（但增加内存占用）。若global_batch_size较大，则对训练速度的影响不大。
 - 🔥optimizer_offload_fraction: 卸载到 CPU 的优化器状态所占比例。默认为1.。
+- optimizer_cuda_graph: 是否为优化器步骤启用 CUDA 计算图，传递给 Megatron 的 `--optimizer-cuda-graph`。默认为False。该参数需要"megatron-core>=0.17"。
 - use_precision_aware_optimizer: 使用 TransformerEngine 中的精度感知优化器，该优化器允许将主参数和优化器状态设置为较低精度，例如 fp16 和 fp8。
 - main_grads_dtype: 启用 use_precision_aware_optimizer 时主梯度的 dtype。可选为'fp32', 'bf16'。默认为'fp32'。
 - main_params_dtype: 启用 use_precision_aware_optimizer 时主参数的 dtype。可选为'fp32', 'fp16'。默认为'fp32'。
@@ -141,6 +142,9 @@
 - ddp_backend: 分布式后端，可选为'nccl', 'gloo'。默认为nccl。
 - ddp_timeout: 默认为18000000，单位为秒。
 - 🔥use_distributed_optimizer: 使用分布式优化器（即zero1）。默认为True。
+- use_megatron_fsdp: 使用 Megatron-FSDP 作为数据并行的实现（替代DDP）。默认为False。开启后会强制`use_distributed_optimizer=True`，仅支持`sgd`/`adam`优化器，且要求`CUDA_DEVICE_MAX_CONNECTIONS`大于1。
+  - 注意：尽量不要将 Megatron-FSDP 与张量并行（tensor parallelism）或上下文并行（context parallelism）同时使用，因为两者对`CUDA_DEVICE_MAX_CONNECTIONS`的最佳设置相互冲突：序列并行（sequence parallelism）需要将`CUDA_DEVICE_MAX_CONNECTIONS`设为1，而 Megatron-FSDP 则要求不能设为1（以获得更好的并行度）。
+- data_parallel_sharding_strategy: Megatron-FSDP 的数据并行切分策略。可选为'no_shard', 'optim', 'optim_grads', 'optim_grads_params'，默认为'optim_grads_params'。仅在`use_megatron_fsdp=True`时生效。
 - 🔥tensor_model_parallel_size: tp数，默认为1。
 - 🔥pipeline_model_parallel_size: pp数，默认为1。
 - 🔥decoder_first_pipeline_num_layers: decoder第一个流水线阶段所包含的Transformer层数。默认为 None，表示将Transformer层数平均分配到所有流水线阶段。
@@ -152,6 +156,9 @@
 - align_param_gather: 设置为True，所有 PP 阶段将同时启动参数全收集（all-gather）操作。否则，每个 PP 阶段将根据需要独立启动。默认为True。
 - 🔥sequence_parallel: 启动序列并行优化，该参数需要设置`tensor_model_parallel_size`才生效。默认为False。
 - 🔥context_parallel_size: cp数，默认为1。
+- cp_comm_type: 上下文并行（Context Parallelism）中 GPU 间的通信类型。可选值为 "p2p"、"all_gather"、"a2a" 或 "a2a+p2p"。默认为None。
+- cp_partition_mode: THD 序列行如何在上下文并行（context-parallel）ranks 之间进行划分。可选为"zigzag", "contiguous"，默认为"zigzag"。
+- sequence_packing_scheduler: 用于序列打包和动态上下文并行的调度器。可选为"dp_balanced"，"default_dynamic_cp"。dp_balanced：用于序列打包的 DP 均衡调度器。default_dynamic_cp：用于打包序列均衡的动态 CP 调度器。默认为None。
 - tp_comm_overlap: 启用张量并行通信与GEMM（通用矩阵乘法）内核的重叠（降低通信耗时）。默认为False。
 - 🔥overlap_grad_reduce: 启用DDP中grad reduce操作的重叠（降低DP通信耗时）。默认为False。
 - 🔥overlap_param_gather: 启用分布式优化器中参数all-gather的重叠（降低DP通信耗时）。默认为False。
@@ -397,22 +404,31 @@ Megatron训练参数继承自Megatron参数和基本参数（**与ms-swift共用
 - log_rollout_offpolicy_metrics: 当 `rollout_importance_sampling_mode` 未设置时，是否记录训推不一致诊断指标（KL、PPL、χ²等）。当设置了 `rollout_importance_sampling_mode` 时，指标会自动记录。默认为False。
 - off_policy_sequence_mask_delta: Off-Policy Sequence Masking 阈值，来自 DeepSeek-V3.2 论文。当设置此值时，会计算每个序列的 `mean(old_policy_logps - policy_logps)`，若该值大于阈值且该序列的优势为负，则 mask 掉该序列不参与损失计算。默认为None，不启用。具体参考[文档](../Instruction/GRPO/AdvancedResearch/training_inference_mismatch.md#off-policy-sequence-masking)。
 - router_replay_mode: 路由重放模式，可选项为`disabled`、`R2`、`R3`。默认为disabled，不启用路由重放。
+- teacher_kl_coef: OPD-RL中teacher_kl的系数，即 `adv_t = base_adv + teacher_kl_coef * teacher_kl`。默认为 1.0。
 
 内置奖励函数参数参考[文档](../Instruction/Command-line-parameters.md#奖励函数参数)
 
 ### GKD参数
-- teacher_model: 教师模型的路径或模型 ID，必需参数。
-- teacher_model_type: 教师模型类型，默认为None，自动检测。
-- teacher_model_revision: 教师模型版本，默认为None。
+
 - beta: JSD 散度插值系数。0.0 代表 Forward KL，0.5 代表对称 JSD，1.0 代表 Reverse KL。默认为0.5。
 - lmbda: On-Policy 学习触发概率。0.0 代表纯 Off-Policy，1.0 代表纯 On-Policy。默认为0.5。
 - temperature: 用于采样和损失计算的温度参数。默认为0.9。
-- offload_teacher_model: 是否将教师模型卸载到 CPU 以节省 GPU 显存。默认为False。
 - sft_alpha: SFT 损失的混合系数，`loss = jsd_loss + sft_alpha * sft_loss`。当使用数据集响应（Off-Policy）时生效。默认为0。
 - max_completion_length: 生成时的最大 token 数。默认为512。
 - vllm_mode: 同 GRPO 参数，用于 On-Policy 生成。colocate 模式下在程序内部署 vLLM。
   - 注意：On-Policy 生成需要启用 vLLM（`--use_vllm true --vllm_mode colocate/server`）。
   - 当 `lmbda > 0` 但未启用 vLLM 时，将自动回退到 Off-Policy 模式。
+
+### teacher 参数
+在GKD与GRPO中使用
+
+- teacher_model: 教师模型的路径或模型 ID，必需参数。
+- teacher_model_type: 教师模型类型，默认为None，自动检测。
+- teacher_model_revision: 教师模型版本，默认为None。
+- teacher_model_server: 教师模型服务地址，通过 `swift deploy` 部署后用于获取 logprobs，与 `teacher_model` 互斥。支持单 URL 或多 teacher JSON（`'[{"url":"...","tags":["..."]}, ...]'`）。详见[蒸馏文档](../Instruction/Distillation.md#multi-teacher多教师路由)。
+- teacher_tag_key: 多 teacher 路由时样本匹配 teacher `tags` 的字段名，默认为 `"dataset"`。
+- offload_teacher_model: 是否将教师模型卸载到 CPU 以节省 GPU 显存。默认为False。
+
 
 ## 导出参数
 这里介绍`megatron export`的参数，若要使用`swift export`导出命令，请参考[ms-swift命令行参数文档](../Instruction/Command-line-parameters.md#导出参数)。`megatron export`相比`swift export`，支持分布式和多机导出。Megatron导出参数继承自Megatron参数和基本参数。
