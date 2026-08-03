@@ -11,12 +11,10 @@ from functools import partial
 from json import JSONDecodeError
 from subprocess import PIPE, STDOUT, Popen
 from transformers.utils import is_torch_cuda_available, is_torch_npu_available
-
-from swift.utils import is_torch_supa_available
 from typing import Dict, Type
 
 from swift.arguments import ExportArguments, RLHFArguments, get_supported_tuners
-from swift.utils import get_device_count, get_logger
+from swift.utils import get_device_count, get_logger, is_torch_supa_available
 from ..base import BaseUI
 from .advanced import Advanced
 from .dataset import Dataset

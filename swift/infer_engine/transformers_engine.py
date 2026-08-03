@@ -18,15 +18,14 @@ from torch import nn
 from tqdm import tqdm
 from transformers import GenerationConfig, LogitsProcessorList
 from transformers.utils import is_torch_npu_available
-
-from swift.utils import is_torch_supa_available
 from typing import Any, AsyncIterator, Dict, Iterator, List, Optional, Union
 
 from swift.metrics import Metric
 from swift.model import get_model_processor
 from swift.template import Template
 from swift.tuners import Swift
-from swift.utils import get_last_valid_indices, patch_kernels, safe_snapshot_download, to_device
+from swift.utils import (get_last_valid_indices, is_torch_supa_available, patch_kernels, safe_snapshot_download,
+                         to_device)
 from .infer_engine import InferEngine
 from .protocol import (ChatCompletionResponse, ChatCompletionResponseChoice, ChatCompletionResponseStreamChoice,
                        ChatCompletionStreamResponse, ChatMessage, DeltaMessage, EmbeddingResponse,

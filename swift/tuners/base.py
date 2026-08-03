@@ -16,12 +16,10 @@ from peft.utils.other import SAFETENSORS_WEIGHTS_NAME, WEIGHTS_NAME
 from torch import nn
 from transformers import Trainer as HfTrainer
 from transformers.utils import is_torch_npu_available
-
-from swift.utils import is_torch_supa_available
 from types import MethodType
 from typing import Dict, List, Literal, Optional, Union
 
-from swift.utils import get_device_count, get_logger, get_torch_device
+from swift.utils import get_device_count, get_logger, get_torch_device, is_torch_supa_available
 from swift.utils.constants import DEFAULT_ADAPTER, SWIFT_TYPE_KEY
 from .mapping import SwiftTuners
 from .peft import PeftConfig, PeftModel, get_peft_model

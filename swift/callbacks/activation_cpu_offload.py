@@ -13,7 +13,6 @@ from .base import TrainerCallback
 
 logger = get_logger()
 
-
 is_cuda_available = torch.cuda.is_available()
 is_npu_available = is_torch_npu_available()
 is_supa_available = is_torch_supa_available()

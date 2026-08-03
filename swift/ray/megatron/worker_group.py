@@ -6,10 +6,9 @@ from enum import Enum
 from ray.runtime_env import RuntimeEnv
 from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
 from transformers.utils import is_torch_npu_available
-
-from swift.utils import is_torch_supa_available
 from typing import TYPE_CHECKING, Any, Dict, List, Union
 
+from swift.utils import is_torch_supa_available
 from swift.utils.logger import get_logger
 
 if TYPE_CHECKING:

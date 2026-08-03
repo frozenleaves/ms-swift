@@ -173,7 +173,6 @@ class RolloutReplica:
         from transformers.utils import is_torch_npu_available
 
         from swift.utils import is_torch_supa_available
-
         from .vllm_server import VllmServer
 
         if is_torch_npu_available():

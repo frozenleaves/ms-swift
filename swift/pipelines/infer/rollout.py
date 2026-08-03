@@ -33,8 +33,6 @@ from itertools import chain
 from multiprocessing import Pipe, Process
 from multiprocessing.connection import Connection
 from transformers.utils import is_torch_npu_available
-
-from swift.utils import is_torch_supa_available
 from typing import Any, Dict, List, Optional, Union
 
 from swift.arguments import RolloutArguments
@@ -49,7 +47,7 @@ from swift.rlhf_trainers.utils import (VLLM_LORA_INT_ID, VLLM_LORA_NAME, VLLM_LO
                                        patch_vllm_moe_model_weight_loader, vllm_supports_lora_load_inplace)
 from swift.rollout import RolloutScheduler, multi_turns
 from swift.utils import (gc_collect, get_logger, get_physical_device_count, get_seed, ipc_collect, is_torch_rocm,
-                         is_vllm_ascend_available, is_vllm_metax_available, synchronize)
+                         is_torch_supa_available, is_vllm_ascend_available, is_vllm_metax_available, synchronize)
 from ..base import SwiftPipeline
 
 try:
