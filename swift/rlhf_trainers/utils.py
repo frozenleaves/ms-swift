@@ -29,8 +29,8 @@ from swift.rl_core.data import GRPOBatch, OnPolicySample
 from swift.template import Messages, Template
 from swift.tuners.lora import LoraConfig
 from swift.utils import (gc_collect, get_cu_seqlens_from_position_ids, get_logger, get_packed_seq_params,
-                         get_torch_device, is_swanlab_available, is_vllm_available, is_wandb_available, swanlab_get_run,
-                         synchronize, to_device)
+                         get_torch_device, is_swanlab_available, is_torch_supa_available, is_vllm_available,
+                         is_wandb_available, swanlab_get_run, synchronize, to_device)
 
 if is_wandb_available():
     import wandb
@@ -419,9 +419,10 @@ def memory_time_profiling_context(
     gc_collect()
 
     # Record initial memory state
-    memory_before = torch.cuda.memory_allocated() / 1024**3  # GiB
-    memory_reserved_before = torch.cuda.memory_reserved() / 1024**3
-    max_memory_before = torch.cuda.max_memory_allocated() / 1024**3
+    _device = get_torch_device()
+    memory_before = _device.memory_allocated() / 1024**3  # GiB
+    memory_reserved_before = _device.memory_reserved() / 1024**3
+    max_memory_before = _device.max_memory_allocated() / 1024**3
 
     logger.info(f'[{name}] Before: '
                 f'Allocated = {memory_before:.2f} GiB, '
@@ -443,9 +444,9 @@ def memory_time_profiling_context(
     elapsed_time = time.perf_counter() - start_time
 
     # Record final memory state
-    memory_after = torch.cuda.memory_allocated() / 1024**3
-    memory_reserved_after = torch.cuda.memory_reserved() / 1024**3
-    peak_memory = torch.cuda.max_memory_allocated() / 1024**3
+    memory_after = _device.memory_allocated() / 1024**3
+    memory_reserved_after = _device.memory_reserved() / 1024**3
+    peak_memory = _device.max_memory_allocated() / 1024**3
     memory_change = memory_after - memory_before
 
     logger.info(f'[{name}] After: '
@@ -456,8 +457,8 @@ def memory_time_profiling_context(
                 f'Time = {elapsed_time:.2f}s')
 
     # Reset peak memory statistics for next cycle
-    if reset_peak_stats and torch.cuda.is_available():
-        torch.cuda.reset_peak_memory_stats()
+    if reset_peak_stats and hasattr(_device, 'reset_peak_memory_stats'):
+        _device.reset_peak_memory_stats()
 
 
 def round_robin(num_reqs, num_workers):
@@ -1647,6 +1648,9 @@ def set_expandable_segments(enable: bool) -> None:
     if torch.cuda.is_available():
         torch.cuda.memory._set_allocator_settings(f'expandable_segments:{enable}')
         os.environ['PYTORCH_CUDA_ALLOC_CONF'] = f'expandable_segments:{enable}'
+    elif is_torch_supa_available():
+        torch.supa.memory._set_allocator_settings(f'expandable_segments:{enable}')
+        os.environ['PYTORCH_SUPA_ALLOC_CONF'] = f'expandable_segments:{enable}'
 
 
 def peft_config_to_dict(peft_config):

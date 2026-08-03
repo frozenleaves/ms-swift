@@ -8,6 +8,7 @@ from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
 from transformers.utils import is_torch_npu_available
 from typing import TYPE_CHECKING, Any, Dict, List, Union
 
+from swift.utils import is_torch_supa_available
 from swift.utils.logger import get_logger
 
 if TYPE_CHECKING:
@@ -349,12 +350,17 @@ class WorkerGroup:
     def _get_device_env_config() -> Dict[str, str]:
         """Return platform-specific environment variable names.
 
-        Supports CUDA (GPU) and Ascend (NPU).
+        Supports CUDA (GPU), Ascend (NPU), and SUPA.
         """
         if is_torch_npu_available():
             return {
                 'visible_devices_key': 'ASCEND_RT_VISIBLE_DEVICES',
                 'device_max_connections_key': 'HCCL_DEVICE_MAX_CONNECTIONS',
+            }
+        if is_torch_supa_available():
+            return {
+                'visible_devices_key': 'SUPA_VISIBLE_DEVICES',
+                'device_max_connections_key': 'BCCL_DEVICE_MAX_CONNECTIONS',
             }
         return {
             'visible_devices_key': 'CUDA_VISIBLE_DEVICES',

@@ -128,6 +128,8 @@ class ModelArguments:
             self._init_mixed_precision()
 
     def _init_mixed_precision(self):
+        from swift.utils import is_torch_supa_available
+
         if is_torch_mps_available():
             fp16, bf16 = False, False
         elif self.torch_dtype in {torch.float16, torch.float32}:
@@ -136,6 +138,8 @@ class ModelArguments:
             fp16, bf16 = False, True
         else:
             raise ValueError(f'args.torch_dtype: {self.torch_dtype}')
+        if is_torch_supa_available() and fp16:
+            fp16 = False
         if self.fp16 is None:
             self.fp16 = fp16
         if self.bf16 is None:

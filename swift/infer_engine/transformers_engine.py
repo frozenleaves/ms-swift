@@ -24,7 +24,8 @@ from swift.metrics import Metric
 from swift.model import get_model_processor
 from swift.template import Template
 from swift.tuners import Swift
-from swift.utils import get_last_valid_indices, patch_kernels, safe_snapshot_download, to_device
+from swift.utils import (get_last_valid_indices, is_torch_supa_available, patch_kernels, safe_snapshot_download,
+                         to_device)
 from .infer_engine import InferEngine
 from .protocol import (ChatCompletionResponse, ChatCompletionResponseChoice, ChatCompletionResponseStreamChoice,
                        ChatCompletionStreamResponse, ChatMessage, DeltaMessage, EmbeddingResponse,
@@ -260,6 +261,8 @@ class TransformersEngine(InferEngine):
         def _model_generate(**kwargs):
             if is_torch_npu_available():
                 torch.npu.set_device(self.model.device)
+            elif is_torch_supa_available():
+                torch.supa.set_device(self.model.device)
             self.template.generate(self.model, **kwargs)
 
         generate_kwargs = self.template.prepare_generate_kwargs(generate_kwargs, model=self.model)

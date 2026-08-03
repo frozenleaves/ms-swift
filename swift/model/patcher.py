@@ -20,8 +20,8 @@ from types import MethodType
 from typing import Any, Dict, List, Optional, Union
 
 from swift.utils import (HfConfigFactory, deep_getattr, get_device_count, get_dist_setting, get_last_valid_indices,
-                         get_logger, get_position_ids_from_cu_seqlens, is_mp, is_mp_ddp, safe_ddp_context, to_device,
-                         to_float_dtype)
+                         get_logger, get_position_ids_from_cu_seqlens, get_torch_device, is_mp, is_mp_ddp,
+                         safe_ddp_context, to_device, to_float_dtype)
 
 logger = get_logger()
 
@@ -417,7 +417,7 @@ def _get_max_memory(device_ids: List[int]) -> Dict[Union[int, str], int]:
     for i in range(get_device_count()):
         max_memory[i] = 0
         if i in device_ids_set:
-            max_memory[i] = torch.cuda.mem_get_info(i)[0]
+            max_memory[i] = get_torch_device().mem_get_info(i)[0]
     max_memory['cpu'] = psutil.virtual_memory().available
     return max_memory
 

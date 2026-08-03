@@ -172,9 +172,15 @@ class RolloutReplica:
         from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
         from transformers.utils import is_torch_npu_available
 
+        from swift.utils import is_torch_supa_available
         from .vllm_server import VllmServer
 
-        visible_key = 'ASCEND_RT_VISIBLE_DEVICES' if is_torch_npu_available() else 'CUDA_VISIBLE_DEVICES'
+        if is_torch_npu_available():
+            visible_key = 'ASCEND_RT_VISIBLE_DEVICES'
+        elif is_torch_supa_available():
+            visible_key = 'SUPA_VISIBLE_DEVICES'
+        else:
+            visible_key = 'CUDA_VISIBLE_DEVICES'
 
         node_groups = self._group_by_node(worker_infos)
         self._nnodes = len(node_groups)

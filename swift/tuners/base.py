@@ -19,7 +19,7 @@ from transformers.utils import is_torch_npu_available
 from types import MethodType
 from typing import Dict, List, Literal, Optional, Union
 
-from swift.utils import get_device_count, get_logger
+from swift.utils import get_device_count, get_logger, get_torch_device, is_torch_supa_available
 from swift.utils.constants import DEFAULT_ADAPTER, SWIFT_TYPE_KEY
 from .mapping import SwiftTuners
 from .peft import PeftConfig, PeftModel, get_peft_model
@@ -252,6 +252,8 @@ class SwiftModel(nn.Module):
                 device = 'cuda'
             elif is_torch_npu_available():
                 device = 'npu'
+            elif is_torch_supa_available():
+                device = 'supa'
             else:
                 device = 'cpu'
         if os.path.exists(os.path.join(path, SAFETENSORS_WEIGHTS_NAME)):
@@ -691,8 +693,8 @@ class SwiftModel(nn.Module):
                 trainable_params += num_params
         return f'trainable params: {trainable_params:,d} || all params: {all_param:,d} ' \
                f'|| trainable%: {100 * trainable_params / all_param:.4f}' \
-               '|| cuda memory: ' \
-               f'{sum([torch.cuda.memory_allocated(i) for i in range(get_device_count())]) / 1024 / 1024 / 1024:.2f}' \
+               '|| device memory: ' \
+               f'{sum([get_torch_device().memory_allocated(i) for i in range(get_device_count())]) / 1024 / 1024 / 1024:.2f}' \
                'GiB.'
 
 

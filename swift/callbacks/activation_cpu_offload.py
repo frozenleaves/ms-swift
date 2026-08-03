@@ -8,13 +8,14 @@ from transformers.training_args import TrainingArguments
 from transformers.utils import is_torch_npu_available
 from typing import Any, Optional
 
-from swift.utils import get_logger
+from swift.utils import get_logger, is_torch_supa_available
 from .base import TrainerCallback
 
 logger = get_logger()
 
 is_cuda_available = torch.cuda.is_available()
 is_npu_available = is_torch_npu_available()
+is_supa_available = is_torch_supa_available()
 
 
 def _get_unique_tensor_key(tensor):
@@ -24,14 +25,16 @@ def _get_unique_tensor_key(tensor):
 
 def get_device_name() -> str:
     """Function that gets the torch.device based on the current machine.
-    This currently only supports CPU, CUDA, NPU.
+    This currently only supports CPU, CUDA, NPU, SUPA.
     Returns:
         device
     """
-    if is_cuda_available:
-        device = 'cuda'
-    elif is_npu_available:
+    if is_npu_available:
         device = 'npu'
+    elif is_supa_available:
+        device = 'supa'
+    elif is_cuda_available:
+        device = 'cuda'
     else:
         device = 'cpu'
     return device

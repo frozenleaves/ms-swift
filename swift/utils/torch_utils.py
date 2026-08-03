@@ -1,6 +1,7 @@
 # Copyright (c) ModelScope Contributors. All rights reserved.
 import gc
 import hashlib
+import importlib.util
 import numpy as np
 import os
 import pickle
@@ -12,6 +13,7 @@ import uuid
 from contextlib import contextmanager
 from datasets.utils.filelock import FileLock
 from datetime import timedelta
+from functools import lru_cache
 from modelscope.hub.utils.utils import get_cache_dir
 from transformers.utils import is_torch_cuda_available, is_torch_mps_available, is_torch_npu_available
 from typing import Any, Mapping, Optional, Union
@@ -55,6 +57,24 @@ def nanstd(tensor: torch.Tensor, dim: Optional[Union[int, tuple]] = None, keepdi
     return std
 
 
+@lru_cache
+def is_torch_supa_available(check_device: bool = False) -> bool:
+    """Checks if `torch_supa` is installed and potentially if a SUPA device is in the environment."""
+
+    if importlib.util.find_spec('torch_supa') is None:
+        return False
+    if not hasattr(torch, 'supa') or not callable(getattr(torch.supa, 'is_available', None)):
+        return False
+    if check_device:
+        try:
+            # Will raise a RuntimeError if no SUPA device is found
+            _ = torch.supa.device_count()
+            return torch.supa.is_available()
+        except RuntimeError:
+            return False
+    return torch.supa.is_available()
+
+
 def _find_local_mac() -> str:
     mac = uuid.getnode()
     mac_address = ':'.join(('%012x' % mac)[i:i + 2] for i in range(0, 12, 2))
@@ -64,6 +84,8 @@ def _find_local_mac() -> str:
 def synchronize(device: Union[torch.device, str, int, None] = None):
     if is_torch_npu_available():
         torch.npu.synchronize(device)
+    elif is_torch_supa_available():
+        torch.supa.synchronize(device)
     elif is_torch_cuda_available():
         torch.cuda.synchronize(device)
     else:
@@ -123,6 +145,8 @@ def get_device(local_rank: Optional[Union[str, int]] = None) -> str:
     local_rank = str(local_rank)
     if is_torch_npu_available():
         device = 'npu:{}'.format(local_rank)
+    elif is_torch_supa_available():
+        device = 'supa:{}'.format(local_rank)
     elif is_torch_mps_available():
         device = 'mps:{}'.format(local_rank)
     elif is_torch_cuda_available():
@@ -136,6 +160,8 @@ def get_device(local_rank: Optional[Union[str, int]] = None) -> str:
 def get_current_device():
     if is_torch_npu_available():
         current_device = torch.npu.current_device()
+    elif is_torch_supa_available():
+        current_device = torch.supa.current_device()
     elif is_torch_cuda_available():
         current_device = torch.cuda.current_device()
     elif is_torch_mps_available():
@@ -146,10 +172,12 @@ def get_current_device():
 
 
 def get_torch_device():
-    if is_torch_cuda_available():
-        return torch.cuda
-    elif is_torch_npu_available():
+    if is_torch_npu_available():
         return torch.npu
+    elif is_torch_supa_available():
+        return torch.supa
+    elif is_torch_cuda_available():
+        return torch.cuda
     elif is_torch_mps_available():
         return torch.mps
     else:
@@ -161,6 +189,8 @@ def set_device(local_rank: Optional[Union[str, int]] = None):
         local_rank = max(0, get_dist_setting()[1])
     if is_torch_npu_available():
         torch.npu.set_device(local_rank)
+    elif is_torch_supa_available():
+        torch.supa.set_device(local_rank)
     elif is_torch_cuda_available():
         torch.cuda.set_device(local_rank)
 
@@ -168,6 +198,8 @@ def set_device(local_rank: Optional[Union[str, int]] = None):
 def get_device_count() -> int:
     if is_torch_npu_available():
         return torch.npu.device_count()
+    elif is_torch_supa_available():
+        return torch.supa.device_count()
     elif is_torch_cuda_available():
         return torch.cuda.device_count()
     else:
@@ -247,6 +279,8 @@ def get_physical_device_count() -> int:
 def empty_cache():
     if is_torch_npu_available():
         torch.npu.empty_cache()
+    elif is_torch_supa_available():
+        torch.supa.empty_cache()
     elif is_torch_mps_available():
         torch.mps.empty_cache()
     elif is_torch_cuda_available():
@@ -254,10 +288,12 @@ def empty_cache():
 
 
 def ipc_collect():
-    if is_torch_cuda_available():
-        torch.cuda.ipc_collect()
-    elif is_torch_npu_available():
+    if is_torch_npu_available():
         torch.npu.ipc_collect()
+    elif is_torch_supa_available():
+        torch.supa.ipc_collect()
+    elif is_torch_cuda_available():
+        torch.cuda.ipc_collect()
 
 
 def gc_collect() -> None:
@@ -341,6 +377,8 @@ def init_process_group(backend: Optional[str] = None, timeout: int = 18000000):
     if backend is None:
         if is_torch_npu_available():
             backend = 'hccl'
+        elif is_torch_supa_available():
+            backend = 'bccl'
         elif torch.cuda.is_available():
             backend = 'nccl'
         else:

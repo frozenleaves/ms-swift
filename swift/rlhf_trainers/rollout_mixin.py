@@ -36,8 +36,8 @@ from swift.rollout import MultiTurnScheduler, invoke_async_hook, multi_turns, ru
 from swift.sequence_parallel import sequence_parallel
 from swift.template import Template
 from swift.tuners import Swift
-from swift.utils import (get_current_device, get_logger, is_deepspeed_enabled, is_vllm_available, remove_response,
-                         to_device, unwrap_model_for_generation)
+from swift.utils import (empty_cache, get_current_device, get_logger, is_deepspeed_enabled, is_vllm_available,
+                         remove_response, to_device, unwrap_model_for_generation)
 from .arguments import GKDConfig, GRPOConfig, RolloutTrainerArgumentsMixin
 from .base_rollout_mixin import BaseRolloutTrainerMixin
 from .gkd_helpers import TeacherServerConfig, parse_teacher_model_server, resolve_dynamic_opd_self_distillation
@@ -1406,7 +1406,7 @@ class RolloutTrainerMixin(BaseRolloutTrainerMixin, RLHFTrainerMixin):
         # FSDP2: simple .cpu() is sufficient
         if self._is_fsdp2:
             model.cpu()
-            torch.cuda.empty_cache()
+            empty_cache()
             return
 
         # Default: iterate over parameters
@@ -1417,7 +1417,7 @@ class RolloutTrainerMixin(BaseRolloutTrainerMixin, RLHFTrainerMixin):
                 param.ds_tensor.data = param.ds_tensor.data.to('cpu', non_blocking=True)
             else:
                 param.data = param.data.to(torch.device('cpu'), non_blocking=True)
-        torch.cuda.empty_cache()
+        empty_cache()
 
     @torch.no_grad()
     def load_model(self, model):

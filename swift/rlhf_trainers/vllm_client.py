@@ -17,7 +17,7 @@ from swift.infer_engine import AdapterRequest, RequestConfig
 from swift.infer_engine.protocol import ChatCompletionResponse, RolloutInferRequest, RolloutOutput
 from swift.metrics import Metric
 from swift.utils import (is_trl_available, is_vllm_ascend_available, is_vllm_available, is_vllm_metax_available,
-                         synchronize)
+                         is_vllm_supa_available, synchronize)
 from .utils import (broadcast_tensor_for_vllm_weight_sync, format_host_for_url, is_valid_ipv6_address,
                     peft_config_to_dict, resolve_hostname)
 
@@ -30,6 +30,10 @@ if is_vllm_available():
 
     if is_vllm_metax_available():
         import vllm_metax.patch
+
+    if is_vllm_supa_available():
+        from vllm_supa.patch import apply_patches  # noqa
+        apply_patches()
 
 if is_trl_available():
     import trl

@@ -14,7 +14,7 @@ from transformers.utils import is_torch_cuda_available, is_torch_npu_available
 from typing import Dict, Type
 
 from swift.arguments import ExportArguments, RLHFArguments, get_supported_tuners
-from swift.utils import get_device_count, get_logger
+from swift.utils import get_device_count, get_logger, is_torch_supa_available
 from ..base import BaseUI
 from .advanced import Advanced
 from .dataset import Dataset
@@ -459,6 +459,9 @@ class LLMTrain(BaseUI):
             if is_torch_npu_available():
                 cuda_param = f'ASCEND_RT_VISIBLE_DEVICES={gpus}'
                 all_envs['ASCEND_RT_VISIBLE_DEVICES'] = gpus
+            elif is_torch_supa_available():
+                cuda_param = f'SUPA_VISIBLE_DEVICES={gpus}'
+                all_envs['SUPA_VISIBLE_DEVICES'] = gpus
             elif is_torch_cuda_available():
                 cuda_param = f'CUDA_VISIBLE_DEVICES={gpus}'
                 all_envs['CUDA_VISIBLE_DEVICES'] = gpus

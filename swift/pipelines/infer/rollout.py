@@ -47,7 +47,7 @@ from swift.rlhf_trainers.utils import (VLLM_LORA_INT_ID, VLLM_LORA_NAME, VLLM_LO
                                        patch_vllm_moe_model_weight_loader, vllm_supports_lora_load_inplace)
 from swift.rollout import RolloutScheduler, multi_turns
 from swift.utils import (gc_collect, get_logger, get_physical_device_count, get_seed, ipc_collect, is_torch_rocm,
-                         is_vllm_ascend_available, is_vllm_metax_available, synchronize)
+                         is_torch_supa_available, is_vllm_ascend_available, is_vllm_metax_available, synchronize)
 from ..base import SwiftPipeline
 
 try:
@@ -399,7 +399,12 @@ class WeightSyncWorkerExtension:
         device = getattr(self, 'device', None)
         if device is None:
             local_rank = getattr(self, 'local_rank', 0)
-            device = _torch.device(f'cuda:{local_rank}' if _torch.cuda.is_available() else 'cpu')
+            if _torch.cuda.is_available():
+                device = _torch.device(f'cuda:{local_rank}')
+            elif is_torch_supa_available():
+                device = _torch.device(f'supa:{local_rank}')
+            else:
+                device = _torch.device('cpu')
             self.device = device
 
         tp_rank = getattr(self, 'rank', 0)
@@ -505,6 +510,8 @@ class WeightSyncWorkerExtension:
 
             if _torch.cuda.is_available():
                 _torch.cuda.synchronize()
+            elif is_torch_supa_available():
+                _torch.supa.synchronize()
 
             if is_driver:
                 socket.send(b'')  # bucket received
@@ -558,6 +565,8 @@ class WeightSyncWorkerExtension:
         ipc_collect()
         if _torch.cuda.is_available():
             _torch.cuda.empty_cache()
+        elif is_torch_supa_available():
+            _torch.supa.empty_cache()
 
 
 logger = get_logger()
@@ -597,6 +606,8 @@ def _set_visible_devices_for_dp_rank(data_parallel_rank: int, tensor_parallel_si
     def _get_device_env_var():
         if is_torch_npu_available():
             return 'ASCEND_RT_VISIBLE_DEVICES'
+        if is_torch_supa_available():
+            return 'SUPA_VISIBLE_DEVICES'
         return 'CUDA_VISIBLE_DEVICES'
 
     env_var = _get_device_env_var()

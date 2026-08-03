@@ -12,7 +12,7 @@ if TYPE_CHECKING:
     from .import_utils import (is_flash_attn_2_available, is_flash_attn_3_available, is_liger_available,
                                is_lmdeploy_available, is_megatron_available, is_swanlab_available, is_trl_available,
                                is_unsloth_available, is_vllm_ascend_available, is_vllm_available,
-                               is_vllm_metax_available, is_wandb_available)
+                               is_vllm_metax_available, is_vllm_supa_available, is_wandb_available)
     from .io_utils import JsonlWriter, append_to_jsonl, get_file_mm_type, read_from_jsonl, write_to_jsonl
     from .logger import get_logger, ms_logger_context
     from .np_utils import get_seed, stat_array, transform_jsonl_to_df
@@ -23,8 +23,8 @@ if TYPE_CHECKING:
                               gc_collect, get_current_device, get_device, get_device_count,
                               get_generative_reranker_logits, get_last_valid_indices, get_max_reserved_memory,
                               get_physical_device_count, get_torch_device, init_process_group, ipc_collect,
-                              is_torch_rocm, nanstd, safe_ddp_context, set_default_ddp_config, set_device, synchronize,
-                              time_synchronize, to_device, to_float_dtype)
+                              is_torch_rocm, is_torch_supa_available, nanstd, safe_ddp_context, set_default_ddp_config,
+                              set_device, synchronize, time_synchronize, to_device, to_float_dtype)
     from .transformers_utils import (activate_parameters, disable_deepspeed_zero3, find_all_linears, find_embedding,
                                      find_layers, find_norm, find_sub_module, freeze_parameters,
                                      get_cu_seqlens_from_position_ids, get_model_parameter_info,
@@ -49,7 +49,8 @@ else:
         'import_utils': [
             'is_flash_attn_2_available', 'is_flash_attn_3_available', 'is_liger_available', 'is_lmdeploy_available',
             'is_megatron_available', 'is_swanlab_available', 'is_trl_available', 'is_unsloth_available',
-            'is_vllm_ascend_available', 'is_vllm_available', 'is_vllm_metax_available', 'is_wandb_available'
+            'is_vllm_ascend_available', 'is_vllm_available', 'is_vllm_metax_available', 'is_vllm_supa_available',
+            'is_wandb_available'
         ],
         'io_utils': ['JsonlWriter', 'append_to_jsonl', 'get_file_mm_type', 'read_from_jsonl', 'write_to_jsonl'],
         'logger': ['get_logger', 'ms_logger_context'],
@@ -61,8 +62,9 @@ else:
             'Serializer', 'check_shared_disk', 'disable_safe_ddp_context_use_barrier', 'empty_cache', 'gc_collect',
             'get_current_device', 'get_device', 'get_device_count', 'get_generative_reranker_logits',
             'get_last_valid_indices', 'get_max_reserved_memory', 'get_torch_device', 'init_process_group',
-            'ipc_collect', 'safe_ddp_context', 'set_default_ddp_config', 'set_device', 'synchronize',
-            'time_synchronize', 'to_device', 'to_float_dtype', 'nanstd', 'get_physical_device_count', 'is_torch_rocm'
+            'ipc_collect', 'is_torch_supa_available', 'safe_ddp_context', 'set_default_ddp_config', 'set_device',
+            'synchronize', 'time_synchronize', 'to_device', 'to_float_dtype', 'nanstd', 'get_physical_device_count',
+            'is_torch_rocm'
         ],
         'transformers_utils': [
             'activate_parameters', 'disable_deepspeed_zero3', 'find_all_linears', 'find_embedding', 'find_layers',
